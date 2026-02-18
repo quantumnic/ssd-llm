@@ -11,7 +11,7 @@ use crate::ssd::prefetch::{PrefetchStrategy, Prefetcher};
 use crate::ssd::streamer::SsdStreamer;
 use anyhow::{bail, Result};
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::info;
 
 pub struct InferenceConfig {
     pub temperature: f32,
@@ -36,7 +36,7 @@ pub fn batch_prefill(
     streamer: &SsdStreamer,
     layer_cache: &mut LayerCache,
     kv_cache: &mut KvCache,
-    token_embeddings: &[Vec<f32>],  // one embedding per token
+    token_embeddings: &[Vec<f32>], // one embedding per token
     start_position: usize,
     prefetcher: &Prefetcher,
 ) -> Result<Vec<f32>> {
@@ -86,8 +86,15 @@ pub fn batch_prefill(
             ) {
                 let kv_layer = kv_cache.layer_mut(layer_idx as usize);
                 let attn_output = multi_head_attention_cached(
-                    &attn_input, wq, wk, wv, wo,
-                    n_head, n_head_kv, head_dim, position,
+                    &attn_input,
+                    wq,
+                    wk,
+                    wv,
+                    wo,
+                    n_head,
+                    n_head_kv,
+                    head_dim,
+                    position,
                     kv_layer,
                 );
                 for i in 0..hidden_state.len() {
@@ -132,7 +139,15 @@ pub fn forward_pass_pub(
     position: usize,
     prefetcher: &Prefetcher,
 ) -> Result<()> {
-    forward_pass(gguf, streamer, layer_cache, kv_cache, hidden_state, position, prefetcher)
+    forward_pass(
+        gguf,
+        streamer,
+        layer_cache,
+        kv_cache,
+        hidden_state,
+        position,
+        prefetcher,
+    )
 }
 
 /// Run transformer forward pass for a single token through all layers (with KV cache)
@@ -178,8 +193,15 @@ fn forward_pass(
         ) {
             let kv_layer = kv_cache.layer_mut(layer_idx as usize);
             let attn_output = multi_head_attention_cached(
-                &attn_input, wq, wk, wv, wo,
-                n_head, n_head_kv, head_dim, position,
+                &attn_input,
+                wq,
+                wk,
+                wv,
+                wo,
+                n_head,
+                n_head_kv,
+                head_dim,
+                position,
                 kv_layer,
             );
             // Residual connection
@@ -215,7 +237,11 @@ fn forward_pass(
 }
 
 /// Helper: find a tensor in a cached layer by suffix
-fn find_tensor_in_layer<'a>(cached: &'a CachedLayer, suffix: &str, layer_idx: u32) -> Option<&'a Vec<f32>> {
+fn find_tensor_in_layer<'a>(
+    cached: &'a CachedLayer,
+    suffix: &str,
+    layer_idx: u32,
+) -> Option<&'a Vec<f32>> {
     let full_name = format!("blk.{}.{}", layer_idx, suffix);
     cached.tensors.get(&full_name)
 }
@@ -247,7 +273,13 @@ pub fn generate(
 
     info!(
         "Model: arch={}, layers={}, embd={}, heads={}/{}, vocab={}, ctx={}",
-        gguf.architecture(), n_layers, n_embd, n_head, n_head_kv, vocab_size, n_ctx
+        gguf.architecture(),
+        n_layers,
+        n_embd,
+        n_head,
+        n_head_kv,
+        vocab_size,
+        n_ctx
     );
 
     let prefetcher = Prefetcher::new(PrefetchStrategy::LookAhead(2));
@@ -268,7 +300,9 @@ pub fn generate(
 
     // Batch prefill: load embeddings once, process layer-by-layer across all tokens
     {
-        let embeddings = streamer.load_named_tensor_f32(gguf, "token_embd.weight").ok();
+        let embeddings = streamer
+            .load_named_tensor_f32(gguf, "token_embd.weight")
+            .ok();
         let mut token_embeddings: Vec<Vec<f32>> = Vec::with_capacity(prompt_len);
         for &token_id in &tokens {
             let mut emb = vec![0.0f32; n_embd];
@@ -283,14 +317,21 @@ pub fn generate(
         }
 
         hidden_state = batch_prefill(
-            gguf, streamer, layer_cache, &mut kv_cache,
-            &token_embeddings, 0, &prefetcher,
+            gguf,
+            streamer,
+            layer_cache,
+            &mut kv_cache,
+            &token_embeddings,
+            0,
+            &prefetcher,
         )?;
     }
 
     let prefill_time = start.elapsed();
-    info!("Prefill (batch): {} tokens in {:.2}ms ({:.1} tok/s)",
-        prompt_len, prefill_time.as_millis(),
+    info!(
+        "Prefill (batch): {} tokens in {:.2}ms ({:.1} tok/s)",
+        prompt_len,
+        prefill_time.as_millis(),
         prompt_len as f64 / prefill_time.as_secs_f64()
     );
 
@@ -309,7 +350,9 @@ pub fn generate(
             rms_norm(&mut final_hidden, &norm_w);
         }
 
-        let logits = if let Ok(output_weight) = streamer.load_named_tensor_f32(gguf, "output.weight") {
+        let logits = if let Ok(output_weight) =
+            streamer.load_named_tensor_f32(gguf, "output.weight")
+        {
             matmul_1d(&final_hidden, &output_weight, vocab_size)
         } else if let Ok(embd_weight) = streamer.load_named_tensor_f32(gguf, "token_embd.weight") {
             matmul_1d(&final_hidden, &embd_weight, vocab_size)
@@ -334,7 +377,15 @@ pub fn generate(
             }
         }
 
-        forward_pass(gguf, streamer, layer_cache, &mut kv_cache, &mut hidden_state, pos, &prefetcher)?;
+        forward_pass(
+            gguf,
+            streamer,
+            layer_cache,
+            &mut kv_cache,
+            &mut hidden_state,
+            pos,
+            &prefetcher,
+        )?;
         pos += 1;
     }
 
@@ -348,7 +399,9 @@ pub fn generate(
 
     info!(
         "Decode: {} tokens in {:.2}ms ({:.1} tok/s), KV cache: {:.2} MB",
-        token_count, decode_time.as_millis(), tokens_per_sec,
+        token_count,
+        decode_time.as_millis(),
+        tokens_per_sec,
         kv_cache.size_bytes() as f64 / (1024.0 * 1024.0)
     );
 
@@ -400,13 +453,22 @@ impl<'a> StreamingGenerator<'a> {
 
         // Final RMS norm + project to vocab
         let mut final_hidden = self.hidden_state.clone();
-        if let Ok(norm_w) = self.streamer.load_named_tensor_f32(self.gguf, "output_norm.weight") {
+        if let Ok(norm_w) = self
+            .streamer
+            .load_named_tensor_f32(self.gguf, "output_norm.weight")
+        {
             rms_norm(&mut final_hidden, &norm_w);
         }
 
-        let logits = if let Ok(output_weight) = self.streamer.load_named_tensor_f32(self.gguf, "output.weight") {
+        let logits = if let Ok(output_weight) = self
+            .streamer
+            .load_named_tensor_f32(self.gguf, "output.weight")
+        {
             matmul_1d(&final_hidden, &output_weight, vocab_size)
-        } else if let Ok(embd_weight) = self.streamer.load_named_tensor_f32(self.gguf, "token_embd.weight") {
+        } else if let Ok(embd_weight) = self
+            .streamer
+            .load_named_tensor_f32(self.gguf, "token_embd.weight")
+        {
             matmul_1d(&final_hidden, &embd_weight, vocab_size)
         } else {
             vec![0.0f32; vocab_size]
@@ -422,7 +484,10 @@ impl<'a> StreamingGenerator<'a> {
         let token_text = self.tokenizer.decode_token(token_id);
 
         // Embed new token and forward
-        if let Ok(embeddings) = self.streamer.load_named_tensor_f32(self.gguf, "token_embd.weight") {
+        if let Ok(embeddings) = self
+            .streamer
+            .load_named_tensor_f32(self.gguf, "token_embd.weight")
+        {
             let embd_start = token_id as usize * n_embd;
             let embd_end = embd_start + n_embd;
             if embd_end <= embeddings.len() {
@@ -431,9 +496,13 @@ impl<'a> StreamingGenerator<'a> {
         }
 
         forward_pass(
-            self.gguf, self.streamer, self.layer_cache,
-            &mut self.kv_cache, &mut self.hidden_state,
-            self.position, &self.prefetcher,
+            self.gguf,
+            self.streamer,
+            self.layer_cache,
+            &mut self.kv_cache,
+            &mut self.hidden_state,
+            self.position,
+            &self.prefetcher,
         )?;
 
         self.position += 1;
@@ -472,7 +541,9 @@ pub fn generate_streaming<'a>(
 
     // Batch prefill — load embedding tensor once, layer-major traversal
     {
-        let embeddings = streamer.load_named_tensor_f32(gguf, "token_embd.weight").ok();
+        let embeddings = streamer
+            .load_named_tensor_f32(gguf, "token_embd.weight")
+            .ok();
         let mut token_embeddings: Vec<Vec<f32>> = Vec::with_capacity(tokens.len());
         for &token_id in &tokens {
             let mut emb = vec![0.0f32; n_embd];
@@ -487,8 +558,13 @@ pub fn generate_streaming<'a>(
         }
 
         hidden_state = batch_prefill(
-            gguf, streamer, layer_cache, &mut kv_cache,
-            &token_embeddings, 0, &prefetcher,
+            gguf,
+            streamer,
+            layer_cache,
+            &mut kv_cache,
+            &token_embeddings,
+            0,
+            &prefetcher,
         )?;
     }
 

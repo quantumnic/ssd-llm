@@ -4,7 +4,7 @@
 //! the KV cache from prefill can be reused, skipping expensive SSD reads.
 //! Uses a hash-trie structure keyed on token sequences.
 
-use crate::inference::kv_cache::{KvCache, LayerKvCache};
+use crate::inference::kv_cache::KvCache;
 use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{debug, info};
@@ -42,7 +42,10 @@ pub struct PromptCache {
 
 impl PromptCache {
     pub fn new(max_bytes: usize) -> Self {
-        info!("Prompt cache initialized: {:.1} MB budget", max_bytes as f64 / (1024.0 * 1024.0));
+        info!(
+            "Prompt cache initialized: {:.1} MB budget",
+            max_bytes as f64 / (1024.0 * 1024.0)
+        );
         Self {
             entries: HashMap::new(),
             max_bytes,
@@ -81,14 +84,18 @@ impl PromptCache {
             }
         }
 
-        if let Some((len, entry)) = best_match {
+        if let Some((len, _entry)) = best_match {
             // Update last_access via hash lookup
             let prefix_hash = hash_tokens(&tokens[..len]);
             if let Some(entry) = self.entries.get_mut(&prefix_hash) {
                 entry.last_access = Instant::now();
                 restore_kv_cache(kv_cache, &entry.keys, &entry.values);
                 self.partial_hits += 1;
-                info!("Prompt cache: partial hit — {} of {} tokens cached", len, tokens.len());
+                info!(
+                    "Prompt cache: partial hit — {} of {} tokens cached",
+                    len,
+                    tokens.len()
+                );
                 return Some((len, entry.hidden_state.clone()));
             }
         }
@@ -121,21 +128,28 @@ impl PromptCache {
         }
 
         if size_bytes > self.max_bytes {
-            debug!("Prompt cache: entry too large ({:.1} MB), skipping", size_bytes as f64 / (1024.0 * 1024.0));
+            debug!(
+                "Prompt cache: entry too large ({:.1} MB), skipping",
+                size_bytes as f64 / (1024.0 * 1024.0)
+            );
             return;
         }
 
-        self.entries.insert(hash, CachedKvState {
-            tokens: tokens.to_vec(),
-            keys,
-            values,
-            hidden_state: hidden_state.to_vec(),
-            last_access: Instant::now(),
-            size_bytes,
-        });
+        self.entries.insert(
+            hash,
+            CachedKvState {
+                tokens: tokens.to_vec(),
+                keys,
+                values,
+                hidden_state: hidden_state.to_vec(),
+                last_access: Instant::now(),
+                size_bytes,
+            },
+        );
         self.used_bytes += size_bytes;
 
-        debug!("Prompt cache: stored {} tokens ({:.1} MB), total: {:.1}/{:.1} MB",
+        debug!(
+            "Prompt cache: stored {} tokens ({:.1} MB), total: {:.1}/{:.1} MB",
             tokens.len(),
             size_bytes as f64 / (1024.0 * 1024.0),
             self.used_bytes as f64 / (1024.0 * 1024.0),
@@ -144,14 +158,19 @@ impl PromptCache {
     }
 
     fn evict_oldest(&mut self) {
-        let oldest = self.entries.iter()
+        let oldest = self
+            .entries
+            .iter()
             .min_by_key(|(_, v)| v.last_access)
             .map(|(k, v)| (*k, v.size_bytes));
 
         if let Some((key, size)) = oldest {
             self.entries.remove(&key);
             self.used_bytes -= size;
-            debug!("Prompt cache: evicted entry ({:.1} MB)", size as f64 / (1024.0 * 1024.0));
+            debug!(
+                "Prompt cache: evicted entry ({:.1} MB)",
+                size as f64 / (1024.0 * 1024.0)
+            );
         }
     }
 

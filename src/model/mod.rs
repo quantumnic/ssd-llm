@@ -1,3 +1,3 @@
+pub mod cache;
 pub mod gguf;
 pub mod loader;
-pub mod cache;

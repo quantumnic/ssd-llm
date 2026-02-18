@@ -1,5 +1,5 @@
 //! mmap pool manager with madvise hints
-//! 
+//!
 //! This module manages multiple memory-mapped regions and provides
 //! fine-grained control over OS page cache behavior using madvise.
 

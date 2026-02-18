@@ -6,7 +6,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
 const GGUF_MAGIC: u32 = 0x46475547; // "GGUF" in little-endian
@@ -103,12 +103,12 @@ impl GgmlType {
             Self::F32 | Self::I32 => 4,
             Self::F16 | Self::BF16 | Self::I16 => 2,
             Self::I8 => 1,
-            Self::Q4_0 => 18,   // 2 + 32/2
-            Self::Q4_1 => 20,   // 2 + 2 + 32/2
-            Self::Q5_0 => 22,   // 2 + 4 + 32/2
-            Self::Q5_1 => 24,   // 2 + 2 + 4 + 32/2
-            Self::Q8_0 => 34,   // 2 + 32
-            Self::Q8_1 => 40,   // 4 + 4 + 32
+            Self::Q4_0 => 18, // 2 + 32/2
+            Self::Q4_1 => 20, // 2 + 2 + 32/2
+            Self::Q5_0 => 22, // 2 + 4 + 32/2
+            Self::Q5_1 => 24, // 2 + 2 + 4 + 32/2
+            Self::Q8_0 => 34, // 2 + 32
+            Self::Q8_1 => 40, // 4 + 4 + 32
             Self::Q2K => 256 / 16 * 2 + 256 / 4 + 2 + 2,
             Self::Q3K => 256 / 8 * 3 + 256 / 4 + 12 + 2,
             Self::Q4K => 2 + 2 + 12 + 256 / 2,
@@ -224,7 +224,11 @@ impl GgufFile {
         // Read magic
         let magic = reader.read_u32::<LittleEndian>()?;
         if magic != GGUF_MAGIC {
-            bail!("Not a GGUF file (magic: {:#x}, expected {:#x})", magic, GGUF_MAGIC);
+            bail!(
+                "Not a GGUF file (magic: {:#x}, expected {:#x})",
+                magic,
+                GGUF_MAGIC
+            );
         }
 
         // Read version
@@ -368,12 +372,18 @@ impl GgufFile {
     /// Get tensors for a specific layer
     pub fn layer_tensors(&self, layer_idx: u32) -> Vec<&TensorInfo> {
         let prefix = format!("blk.{}.", layer_idx);
-        self.tensors.iter().filter(|t| t.name.starts_with(&prefix)).collect()
+        self.tensors
+            .iter()
+            .filter(|t| t.name.starts_with(&prefix))
+            .collect()
     }
 
     /// Calculate total size of a layer's tensors
     pub fn layer_size(&self, layer_idx: u32) -> u64 {
-        self.layer_tensors(layer_idx).iter().map(|t| t.size_bytes).sum()
+        self.layer_tensors(layer_idx)
+            .iter()
+            .map(|t| t.size_bytes)
+            .sum()
     }
 }
 

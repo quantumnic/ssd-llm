@@ -8,8 +8,7 @@
 //! - GET /api/version — server version
 //! - POST /v1/chat/completions — OpenAI-compatible endpoint (streaming SSE)
 
-use crate::inference::transformer::{self, InferenceConfig, GenerationResult};
-use crate::inference::tokenizer::SimpleTokenizer;
+use crate::inference::transformer::{self, InferenceConfig};
 use crate::model::cache::LayerCache;
 use crate::model::gguf::GgufFile;
 use crate::ssd::streamer::SsdStreamer;
@@ -19,7 +18,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Server configuration
 pub struct ServerConfig {
@@ -69,13 +68,20 @@ impl ApiServer {
         let streamer = SsdStreamer::new(&self.config.model_path, self.config.memory_budget)?;
         let cache = LayerCache::new(self.config.memory_budget);
 
-        let model_name = self.config.model_path
+        let model_name = self
+            .config
+            .model_path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        info!("Model loaded: {} ({} layers, {} embd, {} vocab)",
-            model_name, gguf.n_layers(), gguf.n_embd(), gguf.vocab_size());
+        info!(
+            "Model loaded: {} ({} layers, {} embd, {} vocab)",
+            model_name,
+            gguf.n_layers(),
+            gguf.n_embd(),
+            gguf.vocab_size()
+        );
 
         let ctx = Arc::new(Mutex::new(ModelContext {
             gguf,
@@ -119,7 +125,9 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let trimmed = line.trim().to_string();
-        if trimmed.is_empty() { break; }
+        if trimmed.is_empty() {
+            break;
+        }
         if let Some(val) = trimmed.strip_prefix("Content-Length:") {
             content_length = val.trim().parse().unwrap_or(0);
         }
@@ -140,8 +148,13 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("POST", "/api/generate") => handle_generate(&mut stream, ctx, &body_str),
         ("POST", "/api/chat") => handle_chat(&mut stream, ctx, &body_str),
         ("POST", "/v1/chat/completions") => handle_openai_chat(&mut stream, ctx, &body_str),
-        ("GET", "/") => send_json_response(&mut stream, 200,
-            r#"{"status":"ssd-llm is running","version":"0.7.0"}"#),
+        ("GET", "/health") => handle_health(&mut stream, ctx),
+        ("GET", "/metrics") => handle_metrics(&mut stream, ctx),
+        ("GET", "/") => send_json_response(
+            &mut stream,
+            200,
+            r#"{"status":"ssd-llm is running","version":"0.9.0"}"#,
+        ),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
 }
@@ -159,10 +172,29 @@ fn handle_tags(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result
 }
 
 fn handle_version(stream: &mut TcpStream) -> Result<()> {
-    send_json_response(stream, 200, r#"{"version":"0.7.0-ssd-llm"}"#)
+    send_json_response(stream, 200, r#"{"version":"0.9.0-ssd-llm"}"#)
 }
 
-fn handle_generate(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &str) -> Result<()> {
+fn handle_health(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
+    let ctx = ctx.lock().unwrap();
+    let metrics = crate::api::metrics::MetricsCollector::new();
+    let json = metrics.health_json(&ctx.model_name, true);
+    send_json_response(stream, 200, &json)
+}
+
+fn handle_metrics(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
+    let ctx = ctx.lock().unwrap();
+    let metrics = crate::api::metrics::MetricsCollector::new();
+    // Check Accept header for prometheus format (simplified — always return JSON for now)
+    let json = metrics.metrics_json(&ctx.model_name, 0);
+    send_json_response(stream, 200, &json)
+}
+
+fn handle_generate(
+    stream: &mut TcpStream,
+    ctx: &Arc<Mutex<ModelContext>>,
+    body: &str,
+) -> Result<()> {
     let prompt = extract_json_string(body, "prompt").unwrap_or_default();
     let max_tokens = extract_json_number(body, "num_predict").unwrap_or(128) as usize;
     let temperature = extract_json_float(body, "temperature").unwrap_or(0.7);
@@ -182,7 +214,13 @@ fn handle_generate(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body:
     }
 
     let mut ctx = ctx.lock().unwrap();
-    let ModelContext { ref gguf, ref streamer, ref mut cache, ref model_name, .. } = *ctx;
+    let ModelContext {
+        ref gguf,
+        ref streamer,
+        ref mut cache,
+        ref model_name,
+        ..
+    } = *ctx;
     let start = Instant::now();
 
     match transformer::generate(gguf, streamer, cache, &prompt, &config) {
@@ -207,12 +245,23 @@ fn handle_generate(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body:
 }
 
 /// Handle streaming generate — sends one JSON object per token via chunked transfer
-fn handle_generate_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, prompt: &str, config: &InferenceConfig) -> Result<()> {
+fn handle_generate_streaming(
+    stream: &mut TcpStream,
+    ctx: &Arc<Mutex<ModelContext>>,
+    prompt: &str,
+    config: &InferenceConfig,
+) -> Result<()> {
     // Send chunked response header
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n")?;
 
     let mut ctx = ctx.lock().unwrap();
-    let ModelContext { ref gguf, ref streamer, ref mut cache, ref model_name, .. } = *ctx;
+    let ModelContext {
+        ref gguf,
+        ref streamer,
+        ref mut cache,
+        ref model_name,
+        ..
+    } = *ctx;
     let start = Instant::now();
 
     // Use the streaming generator
@@ -223,7 +272,9 @@ fn handle_generate_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContex
                 total_tokens += 1;
                 let chunk = format!(
                     r#"{{"model":"{}","created_at":"{}","response":"{}","done":false}}"#,
-                    model_name, chrono_now(), escape_json(&token_text),
+                    model_name,
+                    chrono_now(),
+                    escape_json(&token_text),
                 );
                 write_chunk(stream, &chunk)?;
                 let _ = stream.flush();
@@ -232,14 +283,21 @@ fn handle_generate_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContex
             let elapsed = start.elapsed();
             let final_chunk = format!(
                 r#"{{"model":"{}","created_at":"{}","response":"","done":true,"total_duration":{},"eval_count":{},"eval_duration":{}}}"#,
-                model_name, chrono_now(), elapsed.as_nanos(), total_tokens, elapsed.as_nanos(),
+                model_name,
+                chrono_now(),
+                elapsed.as_nanos(),
+                total_tokens,
+                elapsed.as_nanos(),
             );
             write_chunk(stream, &final_chunk)?;
             write_chunk(stream, "")?; // empty chunk = end
             Ok(())
         }
         Err(e) => {
-            let chunk = format!(r#"{{"error":"{}","done":true}}"#, escape_json(&e.to_string()));
+            let chunk = format!(
+                r#"{{"error":"{}","done":true}}"#,
+                escape_json(&e.to_string())
+            );
             write_chunk(stream, &chunk)?;
             write_chunk(stream, "")?;
             Ok(())
@@ -263,7 +321,13 @@ fn handle_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &st
     }
 
     let mut ctx = ctx.lock().unwrap();
-    let ModelContext { ref gguf, ref streamer, ref mut cache, ref model_name, .. } = *ctx;
+    let ModelContext {
+        ref gguf,
+        ref streamer,
+        ref mut cache,
+        ref model_name,
+        ..
+    } = *ctx;
     let start = Instant::now();
 
     match transformer::generate(gguf, streamer, cache, &prompt, &config) {
@@ -271,7 +335,11 @@ fn handle_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &st
             let elapsed = start.elapsed();
             let resp = format!(
                 r#"{{"model":"{}","created_at":"{}","message":{{"role":"assistant","content":"{}"}},"done":true,"total_duration":{},"eval_count":{}}}"#,
-                model_name, chrono_now(), escape_json(&result.text), elapsed.as_nanos(), result.token_count,
+                model_name,
+                chrono_now(),
+                escape_json(&result.text),
+                elapsed.as_nanos(),
+                result.token_count,
             );
             send_json_response(stream, 200, &resp)
         }
@@ -283,11 +351,22 @@ fn handle_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &st
 }
 
 /// Handle streaming chat — Ollama format
-fn handle_chat_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, prompt: &str, config: &InferenceConfig) -> Result<()> {
+fn handle_chat_streaming(
+    stream: &mut TcpStream,
+    ctx: &Arc<Mutex<ModelContext>>,
+    prompt: &str,
+    config: &InferenceConfig,
+) -> Result<()> {
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n")?;
 
     let mut ctx = ctx.lock().unwrap();
-    let ModelContext { ref gguf, ref streamer, ref mut cache, ref model_name, .. } = *ctx;
+    let ModelContext {
+        ref gguf,
+        ref streamer,
+        ref mut cache,
+        ref model_name,
+        ..
+    } = *ctx;
     let start = Instant::now();
 
     match transformer::generate_streaming(gguf, streamer, cache, prompt, config) {
@@ -297,7 +376,9 @@ fn handle_chat_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>,
                 total_tokens += 1;
                 let chunk = format!(
                     r#"{{"model":"{}","created_at":"{}","message":{{"role":"assistant","content":"{}"}},"done":false}}"#,
-                    model_name, chrono_now(), escape_json(&token_text),
+                    model_name,
+                    chrono_now(),
+                    escape_json(&token_text),
                 );
                 write_chunk(stream, &chunk)?;
                 let _ = stream.flush();
@@ -305,14 +386,20 @@ fn handle_chat_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>,
             let elapsed = start.elapsed();
             let final_chunk = format!(
                 r#"{{"model":"{}","created_at":"{}","message":{{"role":"assistant","content":""}},"done":true,"total_duration":{},"eval_count":{}}}"#,
-                model_name, chrono_now(), elapsed.as_nanos(), total_tokens,
+                model_name,
+                chrono_now(),
+                elapsed.as_nanos(),
+                total_tokens,
             );
             write_chunk(stream, &final_chunk)?;
             write_chunk(stream, "")?;
             Ok(())
         }
         Err(e) => {
-            let chunk = format!(r#"{{"error":"{}","done":true}}"#, escape_json(&e.to_string()));
+            let chunk = format!(
+                r#"{{"error":"{}","done":true}}"#,
+                escape_json(&e.to_string())
+            );
             write_chunk(stream, &chunk)?;
             write_chunk(stream, "")?;
             Ok(())
@@ -320,7 +407,11 @@ fn handle_chat_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>,
     }
 }
 
-fn handle_openai_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &str) -> Result<()> {
+fn handle_openai_chat(
+    stream: &mut TcpStream,
+    ctx: &Arc<Mutex<ModelContext>>,
+    body: &str,
+) -> Result<()> {
     let prompt = extract_last_message_content(body).unwrap_or_default();
     let max_tokens = extract_json_number(body, "max_tokens").unwrap_or(128) as usize;
     let temperature = extract_json_float(body, "temperature").unwrap_or(0.7);
@@ -338,37 +429,62 @@ fn handle_openai_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, bo
     }
 
     let mut ctx = ctx.lock().unwrap();
-    let ModelContext { ref gguf, ref streamer, ref mut cache, ref model_name, .. } = *ctx;
+    let ModelContext {
+        ref gguf,
+        ref streamer,
+        ref mut cache,
+        ref model_name,
+        ..
+    } = *ctx;
 
     match transformer::generate(gguf, streamer, cache, &prompt, &config) {
         Ok(result) => {
             let resp = format!(
                 r#"{{"id":"chatcmpl-ssd","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":0,"completion_tokens":{},"total_tokens":{}}}}}"#,
-                unix_timestamp(), model_name, escape_json(&result.text),
-                result.token_count, result.token_count,
+                unix_timestamp(),
+                model_name,
+                escape_json(&result.text),
+                result.token_count,
+                result.token_count,
             );
             send_json_response(stream, 200, &resp)
         }
         Err(e) => {
-            let resp = format!(r#"{{"error":{{"message":"{}","type":"server_error"}}}}"#, escape_json(&e.to_string()));
+            let resp = format!(
+                r#"{{"error":{{"message":"{}","type":"server_error"}}}}"#,
+                escape_json(&e.to_string())
+            );
             send_json_response(stream, 500, &resp)
         }
     }
 }
 
 /// Handle streaming OpenAI chat — SSE format
-fn handle_openai_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, prompt: &str, config: &InferenceConfig) -> Result<()> {
+fn handle_openai_streaming(
+    stream: &mut TcpStream,
+    ctx: &Arc<Mutex<ModelContext>>,
+    prompt: &str,
+    config: &InferenceConfig,
+) -> Result<()> {
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n")?;
 
     let mut ctx = ctx.lock().unwrap();
-    let ModelContext { ref gguf, ref streamer, ref mut cache, ref model_name, .. } = *ctx;
+    let ModelContext {
+        ref gguf,
+        ref streamer,
+        ref mut cache,
+        ref model_name,
+        ..
+    } = *ctx;
 
     match transformer::generate_streaming(gguf, streamer, cache, prompt, config) {
         Ok(mut gen) => {
             while let Some(token_text) = gen.next_token()? {
                 let chunk = format!(
                     r#"{{"id":"chatcmpl-ssd","object":"chat.completion.chunk","created":{},"model":"{}","choices":[{{"index":0,"delta":{{"content":"{}"}},"finish_reason":null}}]}}"#,
-                    unix_timestamp(), model_name, escape_json(&token_text),
+                    unix_timestamp(),
+                    model_name,
+                    escape_json(&token_text),
                 );
                 write!(stream, "data: {}\n\n", chunk)?;
                 let _ = stream.flush();
@@ -379,7 +495,10 @@ fn handle_openai_streaming(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>
             Ok(())
         }
         Err(e) => {
-            let err = format!(r#"{{"error":{{"message":"{}"}}}}"#, escape_json(&e.to_string()));
+            let err = format!(
+                r#"{{"error":{{"message":"{}"}}}}"#,
+                escape_json(&e.to_string())
+            );
             write!(stream, "data: {}\n\n", err)?;
             Ok(())
         }
@@ -400,8 +519,11 @@ fn write_chunk(stream: &mut TcpStream, data: &str) -> Result<()> {
 
 fn send_response(stream: &mut TcpStream, status: u16, body: &str) -> Result<()> {
     let status_text = match status {
-        200 => "OK", 400 => "Bad Request", 404 => "Not Found",
-        500 => "Internal Server Error", _ => "Unknown",
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "Unknown",
     };
     let resp = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -468,7 +590,9 @@ fn extract_json_float(json: &str, key: &str) -> Option<f32> {
     let after = &json[pos + pattern.len()..];
     let after = after.trim_start().strip_prefix(':')?;
     let after = after.trim_start();
-    let end = after.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-').unwrap_or(after.len());
+    let end = after
+        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+        .unwrap_or(after.len());
     after[..end].parse().ok()
 }
 
@@ -478,9 +602,13 @@ fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
     let after = &json[pos + pattern.len()..];
     let after = after.trim_start().strip_prefix(':')?;
     let after = after.trim_start();
-    if after.starts_with("true") { Some(true) }
-    else if after.starts_with("false") { Some(false) }
-    else { None }
+    if after.starts_with("true") {
+        Some(true)
+    } else if after.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn extract_last_message_content(json: &str) -> Option<String> {

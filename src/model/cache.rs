@@ -92,7 +92,10 @@ impl LayerCache {
         self.layers.insert(layer_idx, layer);
         self.lru_order.push_back(layer_idx);
         self.used += size;
-        debug!("Cache insert layer {} ({} bytes), used: {}/{}", layer_idx, size, self.used, self.budget);
+        debug!(
+            "Cache insert layer {} ({} bytes), used: {}/{}",
+            layer_idx, size, self.used, self.budget
+        );
     }
 
     /// Insert into prefetch buffer (doesn't count toward main budget until accessed)
@@ -108,7 +111,10 @@ impl LayerCache {
     }
 
     fn find_evictable(&self) -> Option<u32> {
-        self.lru_order.iter().find(|idx| !self.pinned.contains(idx)).copied()
+        self.lru_order
+            .iter()
+            .find(|idx| !self.pinned.contains(idx))
+            .copied()
     }
 
     fn evict(&mut self, layer_idx: u32) {

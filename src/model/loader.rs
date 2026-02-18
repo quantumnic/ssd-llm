@@ -38,7 +38,9 @@ impl MmapLoader {
         if end as usize > self.mmap.len() {
             anyhow::bail!(
                 "Tensor data out of bounds: offset={}, size={}, file_len={}",
-                abs_offset, size, self.mmap.len()
+                abs_offset,
+                size,
+                self.mmap.len()
             );
         }
         Ok(&self.mmap[abs_offset as usize..end as usize])
@@ -51,11 +53,7 @@ impl MmapLoader {
         {
             let ptr = unsafe { self.mmap.as_ptr().add(abs_offset as usize) };
             unsafe {
-                libc::madvise(
-                    ptr as *mut libc::c_void,
-                    size as usize,
-                    libc::MADV_WILLNEED,
-                );
+                libc::madvise(ptr as *mut libc::c_void, size as usize, libc::MADV_WILLNEED);
             }
         }
     }
@@ -67,11 +65,7 @@ impl MmapLoader {
         {
             let ptr = unsafe { self.mmap.as_ptr().add(abs_offset as usize) };
             unsafe {
-                libc::madvise(
-                    ptr as *mut libc::c_void,
-                    size as usize,
-                    libc::MADV_DONTNEED,
-                );
+                libc::madvise(ptr as *mut libc::c_void, size as usize, libc::MADV_DONTNEED);
             }
         }
     }

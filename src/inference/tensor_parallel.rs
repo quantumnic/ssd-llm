@@ -8,8 +8,6 @@
 //! Strategy: Column-parallel for output projection, row-parallel for FFN.
 //! Each shard computes a portion of the output, results are concatenated.
 
-use tracing::{debug, info};
-
 /// Configuration for tensor parallelism
 #[derive(Clone, Debug)]
 pub struct TensorParallelConfig {
@@ -57,7 +55,11 @@ pub fn parallel_matvec(
 
     let mut offset = 0;
     for shard_idx in 0..n_shards {
-        let rows = if shard_idx < remainder { shard_size + 1 } else { shard_size };
+        let rows = if shard_idx < remainder {
+            shard_size + 1
+        } else {
+            shard_size
+        };
         let start_row = offset;
         offset += rows;
 
@@ -68,8 +70,6 @@ pub fn parallel_matvec(
             let mut result = Vec::with_capacity(rows);
             for r in start_row..(start_row + rows) {
                 let w_offset = r * in_dim;
-                let mut sum = 0.0f32;
-
                 // 4-wide SIMD-style accumulation
                 let chunks = in_dim / 4;
                 let mut acc0 = 0.0f32;
@@ -84,7 +84,7 @@ pub fn parallel_matvec(
                     acc2 += w_ref[w_offset + i + 2] * x_ref[i + 2];
                     acc3 += w_ref[w_offset + i + 3] * x_ref[i + 3];
                 }
-                sum = acc0 + acc1 + acc2 + acc3;
+                let mut sum = acc0 + acc1 + acc2 + acc3;
 
                 for i in (chunks * 4)..in_dim {
                     sum += w_ref[w_offset + i] * x_ref[i];
@@ -126,7 +126,8 @@ pub fn parallel_ffn(
     let up_proj = parallel_matvec(w_up, x, hidden_dim, n_embd, config);
 
     // SiLU(gate) * up — element-wise, single thread is fine
-    let mut intermediate: Vec<f32> = gate_proj.iter()
+    let intermediate: Vec<f32> = gate_proj
+        .iter()
         .zip(up_proj.iter())
         .map(|(&g, &u)| {
             let silu_g = g * (1.0 / (1.0 + (-g).exp()));
@@ -159,14 +160,17 @@ mod tests {
     fn test_parallel_matvec_correctness() {
         // 4x3 matrix × 3-vector
         let w = vec![
-            1.0, 2.0, 3.0,  // row 0
-            4.0, 5.0, 6.0,  // row 1
-            7.0, 8.0, 9.0,  // row 2
+            1.0, 2.0, 3.0, // row 0
+            4.0, 5.0, 6.0, // row 1
+            7.0, 8.0, 9.0, // row 2
             10.0, 11.0, 12.0, // row 3
         ];
         let x = vec![1.0, 1.0, 1.0];
 
-        let config = TensorParallelConfig { n_shards: 2, min_parallel_dim: 1 };
+        let config = TensorParallelConfig {
+            n_shards: 2,
+            min_parallel_dim: 1,
+        };
         let result = parallel_matvec(&w, &x, 4, 3, &config);
 
         assert_eq!(result.len(), 4);
@@ -180,7 +184,10 @@ mod tests {
     fn test_parallel_matvec_single_shard_fallback() {
         let w = vec![1.0, 0.0, 0.0, 1.0];
         let x = vec![3.0, 7.0];
-        let config = TensorParallelConfig { n_shards: 1, min_parallel_dim: 1 };
+        let config = TensorParallelConfig {
+            n_shards: 1,
+            min_parallel_dim: 1,
+        };
         let result = parallel_matvec(&w, &x, 2, 2, &config);
         assert!((result[0] - 3.0).abs() < 1e-5);
         assert!((result[1] - 7.0).abs() < 1e-5);
@@ -200,15 +207,26 @@ mod tests {
         let w: Vec<f32> = (0..dim * dim).map(|i| (i % 7) as f32 * 0.1).collect();
         let x: Vec<f32> = (0..dim).map(|i| (i % 5) as f32 * 0.2).collect();
 
-        let config_1 = TensorParallelConfig { n_shards: 1, min_parallel_dim: 1 };
-        let config_4 = TensorParallelConfig { n_shards: 4, min_parallel_dim: 1 };
+        let config_1 = TensorParallelConfig {
+            n_shards: 1,
+            min_parallel_dim: 1,
+        };
+        let config_4 = TensorParallelConfig {
+            n_shards: 4,
+            min_parallel_dim: 1,
+        };
 
         let result_1 = parallel_matvec(&w, &x, dim, dim, &config_1);
         let result_4 = parallel_matvec(&w, &x, dim, dim, &config_4);
 
         for i in 0..dim {
-            assert!((result_1[i] - result_4[i]).abs() < 1e-3,
-                "Mismatch at {}: {} vs {}", i, result_1[i], result_4[i]);
+            assert!(
+                (result_1[i] - result_4[i]).abs() < 1e-3,
+                "Mismatch at {}: {} vs {}",
+                i,
+                result_1[i],
+                result_4[i]
+            );
         }
     }
 }

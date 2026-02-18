@@ -87,7 +87,10 @@ impl KvCache {
             "KV cache initialized: layers={}, kv_heads={}, head_dim={}, max_seq={}",
             n_layers, n_kv_heads, head_dim, max_seq_len
         );
-        Self { layers, max_seq_len }
+        Self {
+            layers,
+            max_seq_len,
+        }
     }
 
     /// Get mutable reference to a layer's KV cache

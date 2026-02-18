@@ -1,12 +1,12 @@
 //! Async SSD → RAM streaming engine with prefetching
 
-use crate::model::cache::{CachedLayer, LayerCache};
+use crate::model::cache::CachedLayer;
 use crate::model::gguf::{GgmlType, GgufFile, TensorInfo};
 use crate::model::loader::MmapLoader;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+
 use tracing::{debug, info};
 
 /// SSD streaming engine that loads tensor data on-demand via mmap
@@ -32,7 +32,9 @@ impl SsdStreamer {
 
     /// Load a specific tensor's data and dequantize to f32
     pub fn load_tensor_f32(&self, tensor: &TensorInfo) -> Result<Vec<f32>> {
-        let data = self.loader.get_tensor_data(tensor.offset, tensor.size_bytes)?;
+        let data = self
+            .loader
+            .get_tensor_data(tensor.offset, tensor.size_bytes)?;
         let n_elements: u64 = tensor.dimensions.iter().product();
         dequantize_to_f32(data, &tensor.dtype, n_elements as usize)
     }
@@ -49,7 +51,12 @@ impl SsdStreamer {
             tensors.insert(ti.name.clone(), data);
         }
 
-        debug!("Loaded layer {} ({} tensors, {:.2} MB)", layer_idx, tensors.len(), total_size as f64 / (1024.0 * 1024.0));
+        debug!(
+            "Loaded layer {} ({} tensors, {:.2} MB)",
+            layer_idx,
+            tensors.len(),
+            total_size as f64 / (1024.0 * 1024.0)
+        );
 
         Ok(CachedLayer {
             layer_idx,
@@ -75,7 +82,8 @@ impl SsdStreamer {
 
     /// Load a named tensor directly
     pub fn load_named_tensor_f32(&self, gguf: &GgufFile, name: &str) -> Result<Vec<f32>> {
-        let tensor = gguf.find_tensor(name)
+        let tensor = gguf
+            .find_tensor(name)
             .ok_or_else(|| anyhow::anyhow!("Tensor not found: {}", name))?;
         self.load_tensor_f32(tensor)
     }
@@ -85,23 +93,20 @@ impl SsdStreamer {
 fn dequantize_to_f32(data: &[u8], dtype: &GgmlType, n_elements: usize) -> Result<Vec<f32>> {
     match dtype {
         GgmlType::F32 => {
-            let floats: &[f32] = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const f32, n_elements)
-            };
+            let floats: &[f32] =
+                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, n_elements) };
             Ok(floats.to_vec())
         }
         GgmlType::F16 => {
-            let halfs: &[u16] = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u16, n_elements)
-            };
-            Ok(halfs.iter().map(|&h| half::f16::from_bits(h).to_f32()).collect())
+            let halfs: &[u16] =
+                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u16, n_elements) };
+            Ok(halfs
+                .iter()
+                .map(|&h| half::f16::from_bits(h).to_f32())
+                .collect())
         }
-        GgmlType::Q8_0 => {
-            dequantize_q8_0(data, n_elements)
-        }
-        GgmlType::Q4_0 => {
-            dequantize_q4_0(data, n_elements)
-        }
+        GgmlType::Q8_0 => dequantize_q8_0(data, n_elements),
+        GgmlType::Q4_0 => dequantize_q4_0(data, n_elements),
         _ => {
             // For unsupported quantization types, return zeros with a warning
             tracing::warn!("Unsupported quantization type {:?}, returning zeros", dtype);

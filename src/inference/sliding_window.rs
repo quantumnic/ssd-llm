@@ -196,7 +196,10 @@ fn apply_rope_inplace(x: &mut [f32], head_dim: usize, n_heads: usize, position: 
 
 /// Evict old KV entries outside the sliding window to reclaim memory
 /// Returns the number of positions evicted
-pub fn evict_outside_window(kv_cache: &mut LayerKvCache, window_config: &SlidingWindowConfig) -> usize {
+pub fn evict_outside_window(
+    kv_cache: &mut LayerKvCache,
+    window_config: &SlidingWindowConfig,
+) -> usize {
     if !window_config.is_active() {
         return 0;
     }

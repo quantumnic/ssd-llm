@@ -47,6 +47,9 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🪟 Sliding Window Attention** — Limit attention to recent W tokens with optional sink tokens for bounded memory
 - **🔗 GQA Optimization** — Grouped-Query Attention with batched KV loads, auto-detected from model config
 - **💾 Memory-Mapped KV Cache** — Spill KV cache to SSD via mmap when RAM is exhausted, enabling ultra-long contexts
+- **⚡ Flash Attention** — Memory-efficient fused attention kernel using online softmax (O(1) extra memory per head)
+- **📊 Structured Benchmark Suite** — JSON-exportable benchmarks with cold/warm/streaming scenarios for CI/CD
+- **🏥 Health & Metrics API** — `/health` and `/metrics` endpoints with Prometheus-compatible output for production monitoring
 
 ## Quick Start
 
@@ -259,6 +262,7 @@ This project builds on insights from:
 - [x] v0.6 — Batch prefill optimization, adaptive draft length
 - [x] v0.7 — Continuous batching, prompt caching, tensor parallelism
 - [x] v0.8 — Sliding window attention, GQA optimization, memory-mapped KV cache
+- [x] v0.9 — Structured benchmark suite, flash attention, health/metrics API
 - [ ] v1.0 — Production-ready, benchmarked against llama.cpp
 
 ## Requirements

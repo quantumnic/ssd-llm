@@ -5,9 +5,11 @@
 //! for tensors above the dispatch threshold.
 
 #[cfg(target_os = "macos")]
-use metal::{Buffer, CommandQueue, ComputePipelineState, Device, Library, MTLResourceOptions, MTLSize};
+use metal::{
+    Buffer, CommandQueue, ComputePipelineState, Device, Library, MTLResourceOptions, MTLSize,
+};
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Minimum elements to justify GPU dispatch overhead
 const MIN_GPU_ELEMENTS: usize = 4096;
@@ -52,7 +54,8 @@ impl MetalGpu {
 
             // Compile shaders
             let shader_src = include_str!("shaders/kernels.metal");
-            let library = device.new_library_with_source(shader_src, &metal::CompileOptions::new())
+            let library = device
+                .new_library_with_source(shader_src, &metal::CompileOptions::new())
                 .map_err(|e| {
                     warn!("Failed to compile Metal shaders: {}", e);
                     e
@@ -125,8 +128,13 @@ impl MetalGpu {
 
         let thread_count = MTLSize::new(out_dim as u64, 1, 1);
         let threadgroup_size = MTLSize::new(
-            (self.pipelines.matvec_f32.max_total_threads_per_threadgroup() as u64).min(out_dim as u64),
-            1, 1,
+            (self
+                .pipelines
+                .matvec_f32
+                .max_total_threads_per_threadgroup() as u64)
+                .min(out_dim as u64),
+            1,
+            1,
         );
         encoder.dispatch_threads(thread_count, threadgroup_size);
         encoder.end_encoding();
@@ -178,8 +186,13 @@ impl MetalGpu {
         encoder.set_buffer(3, Some(&n_buf), 0);
         let threads = MTLSize::new(n as u64, 1, 1);
         let tg = MTLSize::new(
-            (self.pipelines.rmsnorm_normalize.max_total_threads_per_threadgroup() as u64).min(n as u64),
-            1, 1,
+            (self
+                .pipelines
+                .rmsnorm_normalize
+                .max_total_threads_per_threadgroup() as u64)
+                .min(n as u64),
+            1,
+            1,
         );
         encoder.dispatch_threads(threads, tg);
         encoder.end_encoding();
@@ -194,7 +207,9 @@ impl MetalGpu {
     #[cfg(target_os = "macos")]
     pub fn softmax_f32(&self, x: &mut [f32]) {
         let n = x.len();
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
 
         // CPU: find max (small reduction)
         let max_val = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -234,8 +249,13 @@ impl MetalGpu {
         encoder.set_buffer(2, Some(&n_buf), 0);
         let threads = MTLSize::new(n as u64, 1, 1);
         let tg = MTLSize::new(
-            (self.pipelines.softmax_normalize.max_total_threads_per_threadgroup() as u64).min(n as u64),
-            1, 1,
+            (self
+                .pipelines
+                .softmax_normalize
+                .max_total_threads_per_threadgroup() as u64)
+                .min(n as u64),
+            1,
+            1,
         );
         encoder.dispatch_threads(threads, tg);
         encoder.end_encoding();
@@ -248,7 +268,14 @@ impl MetalGpu {
 
     /// GPU RoPE in-place
     #[cfg(target_os = "macos")]
-    pub fn rope_f32(&self, x: &mut [f32], head_dim: usize, n_heads: usize, position: usize, theta_base: f32) {
+    pub fn rope_f32(
+        &self,
+        x: &mut [f32],
+        head_dim: usize,
+        n_heads: usize,
+        position: usize,
+        theta_base: f32,
+    ) {
         let x_buf = self.create_buffer_with_data(x);
         let head_dim_buf = self.create_buffer_with_data(&[head_dim as u32]);
         let n_heads_buf = self.create_buffer_with_data(&[n_heads as u32]);
@@ -268,7 +295,8 @@ impl MetalGpu {
         let threads = MTLSize::new(total_pairs, 1, 1);
         let tg = MTLSize::new(
             (self.pipelines.rope_f32.max_total_threads_per_threadgroup() as u64).min(total_pairs),
-            1, 1,
+            1,
+            1,
         );
         encoder.dispatch_threads(threads, tg);
         encoder.end_encoding();
@@ -294,7 +322,8 @@ impl MetalGpu {
         let threads = MTLSize::new(n as u64, 1, 1);
         let tg = MTLSize::new(
             (self.pipelines.silu_f32.max_total_threads_per_threadgroup() as u64).min(n as u64),
-            1, 1,
+            1,
+            1,
         );
         encoder.dispatch_threads(threads, tg);
         encoder.end_encoding();
@@ -320,7 +349,8 @@ impl MetalGpu {
     #[cfg(target_os = "macos")]
     fn create_buffer<T>(&self, count: usize) -> Buffer {
         let size = (count * std::mem::size_of::<T>()) as u64;
-        self.device.new_buffer(size, MTLResourceOptions::StorageModeShared)
+        self.device
+            .new_buffer(size, MTLResourceOptions::StorageModeShared)
     }
 
     #[cfg(target_os = "macos")]

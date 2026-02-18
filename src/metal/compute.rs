@@ -86,9 +86,13 @@ impl MetalCompute {
         // Compile to .air (Metal IR)
         let status = std::process::Command::new("xcrun")
             .args([
-                "-sdk", "macosx", "metal",
-                "-c", metal_path.to_str()?,
-                "-o", air_path.to_str()?,
+                "-sdk",
+                "macosx",
+                "metal",
+                "-c",
+                metal_path.to_str()?,
+                "-o",
+                air_path.to_str()?,
             ])
             .output();
 
@@ -97,7 +101,10 @@ impl MetalCompute {
                 debug!("Metal shaders compiled to AIR");
             }
             Ok(output) => {
-                warn!("Metal shader compilation failed: {}", String::from_utf8_lossy(&output.stderr));
+                warn!(
+                    "Metal shader compilation failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
                 return None;
             }
             Err(e) => {
@@ -109,9 +116,12 @@ impl MetalCompute {
         // Link to .metallib
         let status = std::process::Command::new("xcrun")
             .args([
-                "-sdk", "macosx", "metallib",
+                "-sdk",
+                "macosx",
+                "metallib",
                 air_path.to_str()?,
-                "-o", lib_path.to_str()?,
+                "-o",
+                lib_path.to_str()?,
             ])
             .output();
 
@@ -330,8 +340,10 @@ mod tests {
         // Only on macOS
         if MetalCompute::is_available() {
             let metal = MetalCompute::new().unwrap();
-            assert!(metal.shader_library_path().is_some(),
-                "Metal shaders should compile on macOS");
+            assert!(
+                metal.shader_library_path().is_some(),
+                "Metal shaders should compile on macOS"
+            );
         }
     }
 }

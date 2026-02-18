@@ -1,3 +1,3 @@
-pub mod streamer;
-pub mod prefetch;
 pub mod mmap_pool;
+pub mod prefetch;
+pub mod streamer;

@@ -7,16 +7,16 @@
 use crate::inference::kv_cache::KvCache;
 use crate::inference::sampler::Sampler;
 use crate::inference::tokenizer::SimpleTokenizer;
+use crate::inference::transformer::{self, InferenceConfig};
 use crate::model::cache::LayerCache;
 use crate::model::gguf::GgufFile;
 use crate::ssd::prefetch::{PrefetchStrategy, Prefetcher};
 use crate::ssd::streamer::SsdStreamer;
-use crate::inference::transformer::{self, InferenceConfig};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+
 use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Unique ID for a batch request
 pub type RequestId = u64;
@@ -133,7 +133,11 @@ impl BatchScheduler {
 
         self.queue.push_back(req);
         self.total_requests += 1;
-        debug!("Batch scheduler: submitted request {} (queue: {})", id, self.queue.len());
+        debug!(
+            "Batch scheduler: submitted request {} (queue: {})",
+            id,
+            self.queue.len()
+        );
         id
     }
 
@@ -153,7 +157,11 @@ impl BatchScheduler {
         while self.active.len() < self.max_batch_size && !self.queue.is_empty() {
             let mut req = self.queue.pop_front().unwrap();
             req.state = RequestState::Prefilling;
-            debug!("Batch scheduler: activating request {} (prefill {} tokens)", req.id, req.prompt_tokens.len());
+            debug!(
+                "Batch scheduler: activating request {} (prefill {} tokens)",
+                req.id,
+                req.prompt_tokens.len()
+            );
             self.active.push(req);
         }
 
@@ -177,7 +185,9 @@ impl BatchScheduler {
             }
 
             // Load embeddings and do batch prefill
-            let embeddings = streamer.load_named_tensor_f32(gguf, "token_embd.weight").ok();
+            let embeddings = streamer
+                .load_named_tensor_f32(gguf, "token_embd.weight")
+                .ok();
             let mut token_embeddings: Vec<Vec<f32>> = Vec::with_capacity(req.prompt_tokens.len());
             for &token_id in &req.prompt_tokens {
                 let mut emb = vec![0.0f32; n_embd];
@@ -192,17 +202,28 @@ impl BatchScheduler {
             }
 
             req.hidden_state = transformer::batch_prefill(
-                gguf, streamer, layer_cache, &mut req.kv_cache,
-                &token_embeddings, 0, &prefetcher,
+                gguf,
+                streamer,
+                layer_cache,
+                &mut req.kv_cache,
+                &token_embeddings,
+                0,
+                &prefetcher,
             )?;
             req.position = req.prompt_tokens.len();
             req.state = RequestState::Decoding;
-            debug!("Batch scheduler: request {} prefill complete, switching to decode", req.id);
+            debug!(
+                "Batch scheduler: request {} prefill complete, switching to decode",
+                req.id
+            );
         }
 
         // --- Decode phase: one token per decoding request ---
         // Layer-major: load each layer once, apply to all decoding sequences
-        let decoding_ids: Vec<usize> = self.active.iter().enumerate()
+        let decoding_ids: Vec<usize> = self
+            .active
+            .iter()
+            .enumerate()
             .filter(|(_, r)| r.state == RequestState::Decoding)
             .map(|(i, _)| i)
             .collect();
@@ -242,8 +263,15 @@ impl BatchScheduler {
                     ) {
                         let kv_layer = req.kv_cache.layer_mut(layer_idx as usize);
                         let attn_output = crate::inference::attention::multi_head_attention_cached(
-                            &attn_input, wq, wk, wv, wo,
-                            n_head, n_head_kv, head_dim, position,
+                            &attn_input,
+                            wq,
+                            wk,
+                            wv,
+                            wo,
+                            n_head,
+                            n_head_kv,
+                            head_dim,
+                            position,
                             kv_layer,
                         );
                         for i in 0..req.hidden_state.len() {
@@ -282,7 +310,8 @@ impl BatchScheduler {
             // Sample next token for each decoding request
             for &idx in &decoding_ids {
                 let req = &mut self.active[idx];
-                let sampler = Sampler::new(req.config.temperature, req.config.top_k, req.config.top_p);
+                let sampler =
+                    Sampler::new(req.config.temperature, req.config.top_k, req.config.top_p);
 
                 // Final norm + project to vocab
                 let mut final_hidden = req.hidden_state.clone();
@@ -290,24 +319,43 @@ impl BatchScheduler {
                     crate::metal::compute::rmsnorm_f32_fast(&mut final_hidden, &norm_w, 1e-5);
                 }
 
-                let logits = if let Ok(output_weight) = streamer.load_named_tensor_f32(gguf, "output.weight") {
-                    crate::metal::compute::matvec_f32_simd(&output_weight, &final_hidden, vocab_size, n_embd)
-                } else if let Ok(embd_weight) = streamer.load_named_tensor_f32(gguf, "token_embd.weight") {
-                    crate::metal::compute::matvec_f32_simd(&embd_weight, &final_hidden, vocab_size, n_embd)
+                let logits = if let Ok(output_weight) =
+                    streamer.load_named_tensor_f32(gguf, "output.weight")
+                {
+                    crate::metal::compute::matvec_f32_simd(
+                        &output_weight,
+                        &final_hidden,
+                        vocab_size,
+                        n_embd,
+                    )
+                } else if let Ok(embd_weight) =
+                    streamer.load_named_tensor_f32(gguf, "token_embd.weight")
+                {
+                    crate::metal::compute::matvec_f32_simd(
+                        &embd_weight,
+                        &final_hidden,
+                        vocab_size,
+                        n_embd,
+                    )
                 } else {
                     vec![0.0f32; vocab_size]
                 };
 
                 let token_id = sampler.sample(&logits);
 
-                if token_id == tokenizer.eos_id || token_id == 0 || req.generated.len() >= req.max_tokens {
+                if token_id == tokenizer.eos_id
+                    || token_id == 0
+                    || req.generated.len() >= req.max_tokens
+                {
                     req.done = true;
                 } else {
                     req.generated.push(token_id);
                     req.position += 1;
 
                     // Embed new token for next step
-                    if let Ok(embeddings) = streamer.load_named_tensor_f32(gguf, "token_embd.weight") {
+                    if let Ok(embeddings) =
+                        streamer.load_named_tensor_f32(gguf, "token_embd.weight")
+                    {
                         let s = token_id as usize * n_embd;
                         let e = s + n_embd;
                         if e <= embeddings.len() {
@@ -325,7 +373,9 @@ impl BatchScheduler {
                 let elapsed = req.submitted_at.elapsed();
                 let tps = if elapsed.as_secs_f64() > 0.0 {
                     req.generated.len() as f64 / elapsed.as_secs_f64()
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 results.push(BatchResult {
                     id: req.id,
                     text: tokenizer.decode(&req.generated),
@@ -341,7 +391,10 @@ impl BatchScheduler {
 
         for r in &results {
             self.total_tokens_generated += r.token_count as u64;
-            debug!("Batch scheduler: request {} completed ({} tokens, {:.1} tok/s)", r.id, r.token_count, r.tokens_per_sec);
+            debug!(
+                "Batch scheduler: request {} completed ({} tokens, {:.1} tok/s)",
+                r.id, r.token_count, r.tokens_per_sec
+            );
         }
 
         self.completed.extend(results.clone());
@@ -382,8 +435,17 @@ mod tests {
         let mut sched = BatchScheduler::new(4);
         let id = sched.submit(
             vec![1, 2, 3],
-            InferenceConfig { temperature: 0.7, top_k: 40, top_p: 0.9, max_tokens: 10 },
-            2, 4, 64, 512, 256,
+            InferenceConfig {
+                temperature: 0.7,
+                top_k: 40,
+                top_p: 0.9,
+                max_tokens: 10,
+            },
+            2,
+            4,
+            64,
+            512,
+            256,
         );
         assert_eq!(id, 1);
         assert_eq!(sched.queue_len(), 1);
@@ -396,8 +458,17 @@ mod tests {
         for _ in 0..5 {
             sched.submit(
                 vec![1, 2],
-                InferenceConfig { temperature: 0.7, top_k: 40, top_p: 0.9, max_tokens: 5 },
-                1, 2, 32, 256, 64,
+                InferenceConfig {
+                    temperature: 0.7,
+                    top_k: 40,
+                    top_p: 0.9,
+                    max_tokens: 5,
+                },
+                1,
+                2,
+                32,
+                256,
+                64,
             );
         }
         assert_eq!(sched.queue_len(), 5);

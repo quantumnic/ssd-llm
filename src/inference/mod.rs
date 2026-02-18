@@ -1,6 +1,7 @@
 pub mod attention;
 pub mod batch_scheduler;
 pub mod feed_forward;
+pub mod flash_attention;
 pub mod gqa;
 pub mod kv_cache;
 pub mod mmap_kv_cache;

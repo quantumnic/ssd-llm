@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.9.0 — Structured Benchmark Suite + Flash Attention + Health/Metrics API (2026-02-18)
+
+### Added
+- **Structured benchmark suite** (`benchmark.rs`):
+  - `BenchmarkResults` struct with JSON serialization for CI/CD integration
+  - 6 benchmark scenarios: GGUF parse, cold load, sequential streaming, warm cache, forward pass estimate, cache budget analysis
+  - Rich console output with Unicode table formatting
+  - `--json` CLI flag for machine-readable output (`ssd-llm bench model.gguf --json`)
+  - `run_benchmark_structured()` and `run_benchmark_json()` public APIs
+- **Flash attention** (`inference/flash_attention.rs`):
+  - Online softmax algorithm (Dao et al., 2022 / Milakov & Gimelshein, 2018)
+  - O(1) extra memory per head instead of O(seq_len) — critical for long contexts
+  - 4-wide SIMD dot product accumulator for cache-friendly computation
+  - `flash_attention_cached()` — drop-in replacement for standard attention
+  - `flash_attention_windowed()` — flash attention with sliding window range support
+  - Numerically stable: handles extreme values without NaN/Inf overflow
+  - `--flash-attention` CLI flag for `run` and `serve` commands
+  - 7 new tests: basic, multi-token, single-token equivalence, numerical stability, windowed, GQA, online softmax correctness
+- **Health & metrics API** (`api/metrics.rs`):
+  - `MetricsCollector` — thread-safe atomic counters for production monitoring
+  - `GET /health` — JSON readiness probe (model status, uptime, active requests)
+  - `GET /metrics` — JSON metrics (request counts, token throughput, latency percentiles, cache stats, SSD I/O)
+  - Prometheus-compatible text output via `metrics_prometheus()`
+  - Latency tracking with p50/p95/p99 percentile computation
+  - Bounded latency buffer (last 1000 requests)
+  - 8 new tests: basic metrics, health JSON, loading state, metrics JSON, Prometheus output, error recording, empty percentiles, computed percentiles, cache metrics
+- 19 new tests (74 total, all passing)
+- Codebase cleanup: fixed all clippy warnings across entire project
+
+### Why Flash Attention Matters for SSD-LLM
+Standard attention materializes an N×N score matrix in memory. For long contexts (32K+ tokens), this matrix alone can consume gigabytes. Flash attention computes the exact same result in a single streaming pass, using O(head_dim) memory per head instead of O(seq_len). Combined with sliding window attention, this makes ultra-long context inference viable even on memory-constrained devices.
+
+### Why Structured Benchmarks Matter
+Moving toward v1.0 requires rigorous performance tracking. The structured benchmark suite produces machine-readable JSON for automated regression testing, while the human-readable table gives immediate insight into SSD streaming performance, cache efficiency, and estimated throughput.
+
+### Why Health/Metrics Matter
+Production deployments need observability. The `/health` endpoint enables Kubernetes-style readiness probes, while `/metrics` provides the counters and histograms needed for Grafana dashboards and alerting. Prometheus-compatible output means zero-config integration with standard monitoring stacks.
+
+### Changed
+- CLI: `bench` gains `--json` flag for machine-readable output
+- CLI: `run` and `serve` gain `--flash-attention` flag
+- API server: new `/health` and `/metrics` endpoints
+- API server version bumped to 0.9.0
+- Cargo.toml version bumped to 0.9.0
+- README: updated features, roadmap, architecture
+- Fixed all clippy warnings project-wide (dead_code, unused imports/variables, private interfaces)
+
 ## v0.8.0 — Sliding Window Attention + GQA Optimization + Memory-Mapped KV Cache (2026-02-18)
 
 ### Added

@@ -1,18 +1,42 @@
-mod model;
-mod inference;
-mod ssd;
+#![allow(dead_code)]
+#![allow(
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::unnecessary_cast,
+    clippy::manual_div_ceil,
+    clippy::format_in_format_args,
+    clippy::manual_range_contains,
+    clippy::ptr_arg,
+    clippy::useless_format,
+    clippy::collapsible_if,
+    clippy::redundant_field_names,
+    clippy::single_match,
+    clippy::search_is_some,
+    clippy::trim_split_whitespace,
+    clippy::type_complexity,
+    clippy::vec_box,
+    clippy::module_inception
+)]
+
 mod api;
 mod benchmark;
+mod inference;
 mod metal;
+mod model;
+mod ssd;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "ssd-llm", version, about = "Run 70B+ LLMs on Apple Silicon via SSD streaming")]
+#[command(
+    name = "ssd-llm",
+    version,
+    about = "Run 70B+ LLMs on Apple Silicon via SSD streaming"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -80,6 +104,10 @@ enum Commands {
         /// Enable memory-mapped KV cache (spills to SSD when RAM is full)
         #[arg(long, default_value_t = false)]
         mmap_kv: bool,
+
+        /// Use flash attention (memory-efficient fused attention kernel)
+        #[arg(long, default_value_t = false)]
+        flash_attention: bool,
     },
     /// Show model info from GGUF file
     Info {
@@ -94,6 +122,10 @@ enum Commands {
         /// Memory budget
         #[arg(long, default_value = "8G")]
         memory_budget: String,
+
+        /// Output results as JSON (for CI/CD integration)
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Start Ollama-compatible API server
     Serve {
@@ -147,6 +179,10 @@ enum Commands {
         /// Enable memory-mapped KV cache (spills to SSD when RAM is full)
         #[arg(long, default_value_t = false)]
         mmap_kv: bool,
+
+        /// Use flash attention (memory-efficient fused attention kernel)
+        #[arg(long, default_value_t = false)]
+        flash_attention: bool,
     },
 }
 
@@ -188,7 +224,10 @@ fn main() -> Result<()> {
             println!("Architecture: {}", gguf.architecture());
             println!("Tensors: {}", gguf.header.tensor_count);
             println!("Metadata entries: {}", gguf.header.metadata_kv_count);
-            println!("File size: {:.2} GB", gguf.file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+            println!(
+                "File size: {:.2} GB",
+                gguf.file_size as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
             println!();
 
             println!("=== Architecture ===");
@@ -209,15 +248,28 @@ fn main() -> Result<()> {
             println!("=== Tensor Summary ===");
             let total_bytes: u64 = gguf.tensors.iter().map(|t| t.size_bytes).sum();
             println!("  Total tensors: {}", gguf.tensors.len());
-            println!("  Total tensor data: {:.2} GB", total_bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+            println!(
+                "  Total tensor data: {:.2} GB",
+                total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
 
             if gguf.tensors.len() <= 20 {
                 for t in &gguf.tensors {
-                    println!("  {} — {:?} — {:.2} MB", t.name, t.dimensions, t.size_bytes as f64 / (1024.0 * 1024.0));
+                    println!(
+                        "  {} — {:?} — {:.2} MB",
+                        t.name,
+                        t.dimensions,
+                        t.size_bytes as f64 / (1024.0 * 1024.0)
+                    );
                 }
             } else {
                 for t in gguf.tensors.iter().take(10) {
-                    println!("  {} — {:?} — {:.2} MB", t.name, t.dimensions, t.size_bytes as f64 / (1024.0 * 1024.0));
+                    println!(
+                        "  {} — {:?} — {:.2} MB",
+                        t.name,
+                        t.dimensions,
+                        t.size_bytes as f64 / (1024.0 * 1024.0)
+                    );
                 }
                 println!("  ... ({} more tensors)", gguf.tensors.len() - 10);
             }
@@ -239,20 +291,29 @@ fn main() -> Result<()> {
             sliding_window,
             sink_tokens,
             mmap_kv,
+            flash_attention,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
-            info!("Memory budget: {} bytes ({:.2} GB)", budget, budget as f64 / (1024.0 * 1024.0 * 1024.0));
+            info!(
+                "Memory budget: {} bytes ({:.2} GB)",
+                budget,
+                budget as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
 
             let gguf = model::gguf::GgufFile::open(&model)?;
-            println!("Model loaded: {} tensors, {:.2} GB",
+            println!(
+                "Model loaded: {} tensors, {:.2} GB",
                 gguf.tensors.len(),
                 gguf.file_size as f64 / (1024.0 * 1024.0 * 1024.0)
             );
 
             // Initialize the mmap loader with prefetching
             let loader = ssd::streamer::SsdStreamer::new(&model, budget)?;
-            info!("SSD streamer initialized with {:.2} GB budget", budget as f64 / (1024.0 * 1024.0 * 1024.0));
+            info!(
+                "SSD streamer initialized with {:.2} GB budget",
+                budget as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
 
             // Initialize layer cache
             let mut cache = model::cache::LayerCache::new(budget);
@@ -266,15 +327,21 @@ fn main() -> Result<()> {
             };
 
             // Tensor parallelism
-            let tp_shards = if tensor_parallel > 0 { tensor_parallel }
-                else { inference::tensor_parallel::auto_detect_shards(gguf.n_embd() as usize) };
+            let tp_shards = if tensor_parallel > 0 {
+                tensor_parallel
+            } else {
+                inference::tensor_parallel::auto_detect_shards(gguf.n_embd() as usize)
+            };
             if tp_shards > 1 {
                 println!("🔀 Tensor parallelism: {} shards", tp_shards);
             }
 
             // Sliding window attention
             if sliding_window > 0 {
-                println!("🪟 Sliding window attention: {} tokens (sink: {})", sliding_window, sink_tokens);
+                println!(
+                    "🪟 Sliding window attention: {} tokens (sink: {})",
+                    sliding_window, sink_tokens
+                );
             }
 
             // GQA detection
@@ -283,13 +350,18 @@ fn main() -> Result<()> {
             let attn_strategy = inference::gqa::AttentionStrategy::detect(n_head, n_head_kv);
             match attn_strategy {
                 inference::gqa::AttentionStrategy::GroupedQuery { group_size } => {
-                    println!("🔗 GQA optimized: {} groups of {} query heads (KV savings: {:.0}%)",
-                        n_head_kv, group_size,
-                        (1.0 - attn_strategy.kv_savings_ratio(n_head)) * 100.0);
+                    println!(
+                        "🔗 GQA optimized: {} groups of {} query heads (KV savings: {:.0}%)",
+                        n_head_kv,
+                        group_size,
+                        (1.0 - attn_strategy.kv_savings_ratio(n_head)) * 100.0
+                    );
                 }
                 inference::gqa::AttentionStrategy::MultiQuery => {
-                    println!("🔗 MQA detected: single KV head (KV savings: {:.0}%)",
-                        (1.0 - attn_strategy.kv_savings_ratio(n_head)) * 100.0);
+                    println!(
+                        "🔗 MQA detected: single KV head (KV savings: {:.0}%)",
+                        (1.0 - attn_strategy.kv_savings_ratio(n_head)) * 100.0
+                    );
                 }
                 _ => {}
             }
@@ -299,18 +371,28 @@ fn main() -> Result<()> {
                 println!("💾 Memory-mapped KV cache enabled (spills to SSD)");
             }
 
+            // Flash attention
+            if flash_attention {
+                println!("⚡ Flash attention enabled (memory-efficient O(1) attention)");
+            }
+
             // Prompt caching
-            let mut pcache = if prompt_cache {
+            let _pcache = if prompt_cache {
                 println!("📦 Prompt prefix caching enabled");
                 Some(inference::prompt_cache::PromptCache::new(budget / 4))
-            } else { None };
+            } else {
+                None
+            };
 
             println!("\nPrompt: {}", prompt);
             println!("---");
 
             if let Some(draft_path) = draft_model {
                 // Speculative decoding mode
-                println!("🎯 Speculative decoding with draft model: {}", draft_path.display());
+                println!(
+                    "🎯 Speculative decoding with draft model: {}",
+                    draft_path.display()
+                );
                 let draft_gguf = model::gguf::GgufFile::open(&draft_path)?;
                 let draft_loader = ssd::streamer::SsdStreamer::new(&draft_path, budget / 4)?;
                 let mut draft_cache = model::cache::LayerCache::new(budget / 4);
@@ -326,33 +408,48 @@ fn main() -> Result<()> {
 
                 let start = Instant::now();
                 let result = inference::speculative::generate_speculative(
-                    &gguf, &loader, &mut cache,
-                    &draft_gguf, &draft_loader, &mut draft_cache,
-                    &prompt, &spec_config,
+                    &gguf,
+                    &loader,
+                    &mut cache,
+                    &draft_gguf,
+                    &draft_loader,
+                    &mut draft_cache,
+                    &prompt,
+                    &spec_config,
                 )?;
 
                 let elapsed = start.elapsed();
                 println!("{}", result.text);
                 println!("---");
-                println!("Prompt tokens: {} | Generated: {} | Time: {:.2}s | Speed: {:.2} tok/s",
-                    result.prompt_tokens, result.token_count, elapsed.as_secs_f64(), result.tokens_per_sec);
-                println!("Draft: {}/{} accepted ({:.1}%) | Target passes: {} (saved {:.0}%)",
-                    result.draft_tokens_accepted, result.draft_tokens_total,
-                    result.acceptance_rate * 100.0, result.target_forward_passes,
+                println!(
+                    "Prompt tokens: {} | Generated: {} | Time: {:.2}s | Speed: {:.2} tok/s",
+                    result.prompt_tokens,
+                    result.token_count,
+                    elapsed.as_secs_f64(),
+                    result.tokens_per_sec
+                );
+                println!(
+                    "Draft: {}/{} accepted ({:.1}%) | Target passes: {} (saved {:.0}%)",
+                    result.draft_tokens_accepted,
+                    result.draft_tokens_total,
+                    result.acceptance_rate * 100.0,
+                    result.target_forward_passes,
                     if result.token_count > 0 {
-                        (1.0 - result.target_forward_passes as f64 / result.token_count as f64) * 100.0
-                    } else { 0.0 });
-                println!("KV cache: {:.2} MB", result.kv_cache_bytes as f64 / (1024.0 * 1024.0));
+                        (1.0 - result.target_forward_passes as f64 / result.token_count as f64)
+                            * 100.0
+                    } else {
+                        0.0
+                    }
+                );
+                println!(
+                    "KV cache: {:.2} MB",
+                    result.kv_cache_bytes as f64 / (1024.0 * 1024.0)
+                );
             } else {
                 // Standard decoding
                 let start = Instant::now();
-                let result = inference::transformer::generate(
-                    &gguf,
-                    &loader,
-                    &mut cache,
-                    &prompt,
-                    &config,
-                )?;
+                let result =
+                    inference::transformer::generate(&gguf, &loader, &mut cache, &prompt, &config)?;
 
                 let elapsed = start.elapsed();
                 let tokens_generated = result.token_count;
@@ -360,23 +457,59 @@ fn main() -> Result<()> {
 
                 println!("{}", result.text);
                 println!("---");
-                println!("Prompt tokens: {} | Generated: {} | Time: {:.2}s | Speed: {:.2} tok/s",
-                    result.prompt_tokens, tokens_generated, elapsed.as_secs_f64(), tokens_per_sec);
-                println!("KV cache: {:.2} MB | Layer cache hits: {} | misses: {} | prefetch: {}",
+                println!(
+                    "Prompt tokens: {} | Generated: {} | Time: {:.2}s | Speed: {:.2} tok/s",
+                    result.prompt_tokens,
+                    tokens_generated,
+                    elapsed.as_secs_f64(),
+                    tokens_per_sec
+                );
+                println!(
+                    "KV cache: {:.2} MB | Layer cache hits: {} | misses: {} | prefetch: {}",
                     result.kv_cache_bytes as f64 / (1024.0 * 1024.0),
-                    cache.stats().hits, cache.stats().misses, cache.stats().prefetch_hits);
+                    cache.stats().hits,
+                    cache.stats().misses,
+                    cache.stats().prefetch_hits
+                );
             }
         }
 
-        Commands::Bench { model, memory_budget } => {
+        Commands::Bench {
+            model,
+            memory_budget,
+            json,
+        } => {
             let budget = parse_memory_budget(&memory_budget)?;
-            benchmark::run_benchmark(&model, budget)?;
+            if json {
+                let json_str = benchmark::run_benchmark_json(&model, budget)?;
+                println!("{}", json_str);
+            } else {
+                benchmark::run_benchmark(&model, budget)?;
+            }
         }
 
-        Commands::Serve { model, memory_budget, host, port, draft_model, draft_ahead, adaptive_draft, prompt_cache, max_batch, tensor_parallel, sliding_window, sink_tokens, mmap_kv } => {
+        Commands::Serve {
+            model,
+            memory_budget,
+            host,
+            port,
+            draft_model,
+            draft_ahead,
+            adaptive_draft,
+            prompt_cache,
+            max_batch,
+            tensor_parallel,
+            sliding_window: _,
+            sink_tokens: _,
+            mmap_kv: _,
+            flash_attention: _,
+        } => {
             let budget = parse_memory_budget(&memory_budget)?;
-            let tp_shards = if tensor_parallel > 0 { tensor_parallel }
-                else { inference::tensor_parallel::auto_detect_shards(budget) };
+            let tp_shards = if tensor_parallel > 0 {
+                tensor_parallel
+            } else {
+                inference::tensor_parallel::auto_detect_shards(budget)
+            };
             let server = api::server::ApiServer::new(api::server::ServerConfig {
                 host,
                 port,

@@ -10,7 +10,7 @@
 //! - Transparent API: callers don't need to know where data lives
 //! - Automatic promotion: cold → hot when accessed frequently
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ pub struct MmapKvCache {
 }
 
 /// Per-layer mmap-backed KV cache
-struct MmapLayerKv {
+pub struct MmapLayerKv {
     /// Hot keys (recent, in RAM): [position] -> Vec<f32>
     hot_keys: Vec<Vec<f32>>,
     /// Hot values (recent, in RAM): [position] -> Vec<f32>
@@ -87,7 +87,9 @@ impl MmapKvCache {
 
         info!(
             "MmapKvCache: layers={}, kv_heads={}, head_dim={}, ram_budget={:.2}MB, backing={}",
-            n_layers, n_kv_heads, head_dim,
+            n_layers,
+            n_kv_heads,
+            head_dim,
             ram_budget as f64 / (1024.0 * 1024.0),
             backing_dir.display()
         );
@@ -143,7 +145,10 @@ impl MmapKvCache {
 
     /// Cold storage size on SSD
     pub fn cold_bytes(&self) -> usize {
-        self.layers.iter().map(|l| l.cold_len * l.entry_bytes * 2).sum()
+        self.layers
+            .iter()
+            .map(|l| l.cold_len * l.entry_bytes * 2)
+            .sum()
     }
 
     /// Number of positions in cold storage
@@ -171,7 +176,9 @@ impl MmapKvCache {
             layer.rollback(new_len);
         }
         // Recalculate RAM usage
-        self.ram_used = self.layers.iter()
+        self.ram_used = self
+            .layers
+            .iter()
             .map(|l| l.hot_keys.len() * l.entry_bytes * 2)
             .sum();
     }
@@ -246,10 +253,7 @@ impl MmapLayerKv {
                     let slice = &mmap[byte_offset..byte_end];
                     // Safety: f32 is 4 bytes, properly aligned in mmap
                     unsafe {
-                        std::slice::from_raw_parts(
-                            slice.as_ptr() as *const f32,
-                            self.head_dim,
-                        )
+                        std::slice::from_raw_parts(slice.as_ptr() as *const f32, self.head_dim)
                     }
                 } else {
                     &[]
@@ -275,10 +279,7 @@ impl MmapLayerKv {
                 if byte_end <= mmap.len() {
                     let slice = &mmap[byte_offset..byte_end];
                     unsafe {
-                        std::slice::from_raw_parts(
-                            slice.as_ptr() as *const f32,
-                            self.head_dim,
-                        )
+                        std::slice::from_raw_parts(slice.as_ptr() as *const f32, self.head_dim)
                     }
                 } else {
                     &[]
@@ -301,10 +302,24 @@ impl MmapLayerKv {
 
         // Create/open backing files if needed
         if self.cold_key_file.is_none() {
-            let key_path = self.backing_dir.join(format!("layer_{}_keys.bin", self.layer_idx));
-            let val_path = self.backing_dir.join(format!("layer_{}_values.bin", self.layer_idx));
-            self.cold_key_file = Some(OpenOptions::new().create(true).append(true).open(&key_path)?);
-            self.cold_value_file = Some(OpenOptions::new().create(true).append(true).open(&val_path)?);
+            let key_path = self
+                .backing_dir
+                .join(format!("layer_{}_keys.bin", self.layer_idx));
+            let val_path = self
+                .backing_dir
+                .join(format!("layer_{}_values.bin", self.layer_idx));
+            self.cold_key_file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&key_path)?,
+            );
+            self.cold_value_file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&val_path)?,
+            );
         }
 
         // Write entries to backing files
@@ -339,14 +354,23 @@ impl MmapLayerKv {
         self.remap()?;
 
         let freed = actual * self.entry_bytes * 2;
-        debug!("Layer {}: spilled {} entries ({:.2}KB) to cold", self.layer_idx, actual, freed as f64 / 1024.0);
+        debug!(
+            "Layer {}: spilled {} entries ({:.2}KB) to cold",
+            self.layer_idx,
+            actual,
+            freed as f64 / 1024.0
+        );
         Ok(freed)
     }
 
     /// Re-create mmap after writing new cold data
     fn remap(&mut self) -> Result<()> {
-        let key_path = self.backing_dir.join(format!("layer_{}_keys.bin", self.layer_idx));
-        let val_path = self.backing_dir.join(format!("layer_{}_values.bin", self.layer_idx));
+        let key_path = self
+            .backing_dir
+            .join(format!("layer_{}_keys.bin", self.layer_idx));
+        let val_path = self
+            .backing_dir
+            .join(format!("layer_{}_values.bin", self.layer_idx));
 
         if key_path.exists() {
             let key_file = File::open(&key_path)?;
@@ -399,8 +423,12 @@ impl MmapLayerKv {
         self.total_len = 0;
 
         // Remove backing files
-        let key_path = self.backing_dir.join(format!("layer_{}_keys.bin", self.layer_idx));
-        let val_path = self.backing_dir.join(format!("layer_{}_values.bin", self.layer_idx));
+        let key_path = self
+            .backing_dir
+            .join(format!("layer_{}_keys.bin", self.layer_idx));
+        let val_path = self
+            .backing_dir
+            .join(format!("layer_{}_values.bin", self.layer_idx));
         let _ = std::fs::remove_file(&key_path);
         let _ = std::fs::remove_file(&val_path);
 
@@ -446,7 +474,11 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("ssd_llm_test_mmap_kv_{}_{}", std::process::id(), id));
+        let dir = std::env::temp_dir().join(format!(
+            "ssd_llm_test_mmap_kv_{}_{}",
+            std::process::id(),
+            id
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -512,7 +544,12 @@ mod tests {
         // Some entries should be in cold storage
         let cold = cache.layers[0].cold_len;
         let hot = cache.layers[0].hot_keys.len();
-        assert!(cold > 0, "Expected some cold entries, got cold={} hot={}", cold, hot);
+        assert!(
+            cold > 0,
+            "Expected some cold entries, got cold={} hot={}",
+            cold,
+            hot
+        );
         assert_eq!(cold + hot, 6);
 
         // Read a hot entry (should always work)

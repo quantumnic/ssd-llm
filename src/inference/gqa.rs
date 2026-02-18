@@ -58,9 +58,7 @@ pub fn gqa_attention(
     for kv_h in 0..n_head_kv {
         // Pre-fetch all key/value vectors for this KV head (loaded once for all Q heads in group)
         // This is the key optimization: avoid re-reading the same KV entries for each Q head
-        let cached_keys: Vec<&[f32]> = (0..seq_len)
-            .map(|pos| kv_cache.key_at(pos, kv_h))
-            .collect();
+        let cached_keys: Vec<&[f32]> = (0..seq_len).map(|pos| kv_cache.key_at(pos, kv_h)).collect();
         let cached_values: Vec<&[f32]> = (0..seq_len)
             .map(|pos| kv_cache.value_at(pos, kv_h))
             .collect();
@@ -143,10 +141,12 @@ pub fn gqa_sliding_window_attention(
 
     for kv_h in 0..n_head_kv {
         // Pre-fetch KV for visible positions only
-        let cached_keys: Vec<&[f32]> = positions.iter()
+        let cached_keys: Vec<&[f32]> = positions
+            .iter()
             .map(|&pos| kv_cache.key_at(pos, kv_h))
             .collect();
-        let cached_values: Vec<&[f32]> = positions.iter()
+        let cached_values: Vec<&[f32]> = positions
+            .iter()
             .map(|&pos| kv_cache.value_at(pos, kv_h))
             .collect();
 
@@ -155,7 +155,8 @@ pub fn gqa_sliding_window_attention(
             let q_offset = h * head_dim;
             let q_head = &q[q_offset..q_offset + head_dim];
 
-            let mut scores: Vec<f32> = cached_keys.iter()
+            let mut scores: Vec<f32> = cached_keys
+                .iter()
                 .map(|k_head| dot_product_simd(q_head, k_head, head_dim) * scale)
                 .collect();
 
@@ -252,7 +253,7 @@ impl AttentionStrategy {
     pub fn description(&self) -> &'static str {
         match self {
             AttentionStrategy::MultiHead => "MHA (Multi-Head Attention)",
-            AttentionStrategy::GroupedQuery { group_size } => "GQA (Grouped-Query Attention)",
+            AttentionStrategy::GroupedQuery { group_size: _ } => "GQA (Grouped-Query Attention)",
             AttentionStrategy::MultiQuery => "MQA (Multi-Query Attention)",
         }
     }
@@ -286,7 +287,9 @@ mod tests {
         let wv = vec![0.01f32; n_head_kv * head_dim * n_embd];
         let wo = vec![0.01f32; n_embd * n_embd];
 
-        let result = gqa_attention(&x, &wq, &wk, &wv, &wo, n_head, n_head_kv, head_dim, 0, &mut kv);
+        let result = gqa_attention(
+            &x, &wq, &wk, &wv, &wo, n_head, n_head_kv, head_dim, 0, &mut kv,
+        );
         assert_eq!(result.len(), n_embd);
         assert_eq!(kv.seq_len(), 1);
     }
@@ -305,7 +308,9 @@ mod tests {
         let wv = vec![0.01f32; n_head_kv * head_dim * n_embd];
 
         for pos in 0..5 {
-            let _ = gqa_attention(&x, &w, &wk, &wv, &w, n_head, n_head_kv, head_dim, pos, &mut kv);
+            let _ = gqa_attention(
+                &x, &w, &wk, &wv, &w, n_head, n_head_kv, head_dim, pos, &mut kv,
+            );
         }
         assert_eq!(kv.seq_len(), 5);
     }
@@ -342,9 +347,18 @@ mod tests {
 
     #[test]
     fn test_attention_strategy_detection() {
-        assert_eq!(AttentionStrategy::detect(32, 32), AttentionStrategy::MultiHead);
-        assert_eq!(AttentionStrategy::detect(32, 8), AttentionStrategy::GroupedQuery { group_size: 4 });
-        assert_eq!(AttentionStrategy::detect(32, 1), AttentionStrategy::MultiQuery);
+        assert_eq!(
+            AttentionStrategy::detect(32, 32),
+            AttentionStrategy::MultiHead
+        );
+        assert_eq!(
+            AttentionStrategy::detect(32, 8),
+            AttentionStrategy::GroupedQuery { group_size: 4 }
+        );
+        assert_eq!(
+            AttentionStrategy::detect(32, 1),
+            AttentionStrategy::MultiQuery
+        );
     }
 
     #[test]

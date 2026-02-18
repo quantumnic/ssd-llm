@@ -39,14 +39,18 @@ impl Sampler {
         let scaled: Vec<f32> = logits.iter().map(|&l| l / self.temperature).collect();
 
         // Top-K filtering
-        let mut indexed: Vec<(usize, f32)> = scaled.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        let mut indexed: Vec<(usize, f32)> =
+            scaled.iter().enumerate().map(|(i, &v)| (i, v)).collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let k = self.top_k.min(indexed.len());
         let candidates: Vec<(usize, f32)> = indexed[..k].to_vec();
 
         // Softmax over candidates
-        let max_val = candidates.iter().map(|(_, v)| *v).fold(f32::NEG_INFINITY, f32::max);
+        let max_val = candidates
+            .iter()
+            .map(|(_, v)| *v)
+            .fold(f32::NEG_INFINITY, f32::max);
         let mut probs: Vec<(usize, f32)> = candidates
             .iter()
             .map(|(idx, v)| (*idx, (v - max_val).exp()))

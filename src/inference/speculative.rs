@@ -75,7 +75,7 @@ impl AdaptiveDrafter {
         self.ema_acceptance
     }
 }
-use crate::inference::sampler::Sampler;
+
 use crate::inference::tokenizer::SimpleTokenizer;
 use crate::model::cache::LayerCache;
 use crate::model::gguf::GgufFile;
@@ -139,8 +139,13 @@ fn forward_single(
 
     // Run through all layers
     crate::inference::transformer::forward_pass_pub(
-        gguf, streamer, layer_cache, kv_cache,
-        &mut hidden_state, position, prefetcher,
+        gguf,
+        streamer,
+        layer_cache,
+        kv_cache,
+        &mut hidden_state,
+        position,
+        prefetcher,
     )?;
 
     // Project to logits
@@ -205,7 +210,9 @@ impl XorShift64 {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
-        Self { state: seed ^ 0x517cc1b727220a95 }
+        Self {
+            state: seed ^ 0x517cc1b727220a95,
+        }
     }
 
     fn next_f32(&mut self) -> f32 {
@@ -285,21 +292,35 @@ pub fn generate_speculative(
 
     // Batch prefill both models with prompt (load embeddings once per model)
     {
-        let t_n_embd_sz = target_gguf.n_embd() as usize;
-        let d_n_embd_sz = draft_gguf.n_embd() as usize;
-        let t_emb = target_streamer.load_named_tensor_f32(target_gguf, "token_embd.weight").ok();
-        let d_emb = draft_streamer.load_named_tensor_f32(draft_gguf, "token_embd.weight").ok();
+        let _t_n_embd_sz = target_gguf.n_embd() as usize;
+        let _d_n_embd_sz = draft_gguf.n_embd() as usize;
+        let _t_emb = target_streamer
+            .load_named_tensor_f32(target_gguf, "token_embd.weight")
+            .ok();
+        let _d_emb = draft_streamer
+            .load_named_tensor_f32(draft_gguf, "token_embd.weight")
+            .ok();
 
         for (pos, &token_id) in tokens.iter().enumerate() {
             // Target prefill
             forward_single(
-                target_gguf, target_streamer, target_cache, &mut target_kv,
-                token_id, pos, &target_prefetcher,
+                target_gguf,
+                target_streamer,
+                target_cache,
+                &mut target_kv,
+                token_id,
+                pos,
+                &target_prefetcher,
             )?;
             // Draft prefill
             forward_single(
-                draft_gguf, draft_streamer, draft_cache, &mut draft_kv,
-                token_id, pos, &draft_prefetcher,
+                draft_gguf,
+                draft_streamer,
+                draft_cache,
+                &mut draft_kv,
+                token_id,
+                pos,
+                &draft_prefetcher,
             )?;
         }
     }
@@ -307,7 +328,8 @@ pub fn generate_speculative(
     let prefill_time = start.elapsed();
     info!(
         "Prefill (batch): {} tokens in {:.2}ms",
-        prompt_len, prefill_time.as_millis()
+        prompt_len,
+        prefill_time.as_millis()
     );
 
     let decode_start = Instant::now();
@@ -337,10 +359,14 @@ pub fn generate_speculative(
 
         // === DRAFT PHASE ===
         // Draft model generates K candidate tokens (K is adaptive or fixed)
-        let current_k = if config.adaptive { drafter.k() } else { config.draft_ahead };
-        let draft_start_pos = pos;
+        let current_k = if config.adaptive {
+            drafter.k()
+        } else {
+            config.draft_ahead
+        };
+        let _draft_start_pos = pos;
         let draft_kv_start = draft_kv.seq_len();
-        let target_kv_start = target_kv.seq_len();
+        let _target_kv_start = target_kv.seq_len();
         let mut draft_tokens: Vec<u32> = Vec::with_capacity(current_k);
         let mut draft_logits_list: Vec<Vec<f32>> = Vec::with_capacity(current_k);
 
@@ -352,11 +378,18 @@ pub fn generate_speculative(
         };
 
         for k in 0..current_k {
-            if draft_kv.is_full() { break; }
+            if draft_kv.is_full() {
+                break;
+            }
 
             let (logits, _) = forward_single(
-                draft_gguf, draft_streamer, draft_cache, &mut draft_kv,
-                current_token, pos + k, &draft_prefetcher,
+                draft_gguf,
+                draft_streamer,
+                draft_cache,
+                &mut draft_kv,
+                current_token,
+                pos + k,
+                &draft_prefetcher,
             )?;
 
             let probs = logits_to_probs(&logits[..vocab_size], config.temperature);
@@ -376,8 +409,13 @@ pub fn generate_speculative(
         if draft_tokens.is_empty() {
             // Draft produced nothing (EOS), do one target pass to confirm
             let (target_logits, _) = forward_single(
-                target_gguf, target_streamer, target_cache, &mut target_kv,
-                current_token, pos, &target_prefetcher,
+                target_gguf,
+                target_streamer,
+                target_cache,
+                &mut target_kv,
+                current_token,
+                pos,
+                &target_prefetcher,
             )?;
             target_passes += 1;
 
@@ -386,8 +424,13 @@ pub fn generate_speculative(
 
             // Also advance draft KV to stay in sync
             let _ = forward_single(
-                draft_gguf, draft_streamer, draft_cache, &mut draft_kv,
-                current_token, pos, &draft_prefetcher,
+                draft_gguf,
+                draft_streamer,
+                draft_cache,
+                &mut draft_kv,
+                current_token,
+                pos,
+                &draft_prefetcher,
             );
 
             if final_token == tokenizer.eos_id || final_token == 0 {
@@ -411,8 +454,13 @@ pub fn generate_speculative(
         };
 
         let (logits_0, _) = forward_single(
-            target_gguf, target_streamer, target_cache, &mut target_kv,
-            verify_start_token, pos, &target_prefetcher,
+            target_gguf,
+            target_streamer,
+            target_cache,
+            &mut target_kv,
+            verify_start_token,
+            pos,
+            &target_prefetcher,
         )?;
         target_logits_list.push(logits_0);
         target_passes += 1;
@@ -420,8 +468,13 @@ pub fn generate_speculative(
         // Run target forward pass for each draft token
         for (k, &draft_tok) in draft_tokens.iter().enumerate() {
             let (logits, _) = forward_single(
-                target_gguf, target_streamer, target_cache, &mut target_kv,
-                draft_tok, pos + 1 + k, &target_prefetcher,
+                target_gguf,
+                target_streamer,
+                target_cache,
+                &mut target_kv,
+                draft_tok,
+                pos + 1 + k,
+                &target_prefetcher,
             )?;
             target_logits_list.push(logits);
             target_passes += 1;
@@ -433,34 +486,56 @@ pub fn generate_speculative(
         let mut n_accepted = 0usize;
 
         for k in 0..draft_tokens.len() {
-            let draft_probs = logits_to_probs(&draft_logits_list[k][..vocab_size], config.temperature);
-            let target_probs = logits_to_probs(&target_logits_list[k][..vocab_size], config.temperature);
+            let draft_probs =
+                logits_to_probs(&draft_logits_list[k][..vocab_size], config.temperature);
+            let target_probs =
+                logits_to_probs(&target_logits_list[k][..vocab_size], config.temperature);
 
             let token = draft_tokens[k] as usize;
-            let p_draft = if token < draft_probs.len() { draft_probs[token] } else { 0.0 };
-            let p_target = if token < target_probs.len() { target_probs[token] } else { 0.0 };
+            let p_draft = if token < draft_probs.len() {
+                draft_probs[token]
+            } else {
+                0.0
+            };
+            let p_target = if token < target_probs.len() {
+                target_probs[token]
+            } else {
+                0.0
+            };
 
             // Accept with probability min(1, p_target / p_draft)
-            let accept_prob = if p_draft > 0.0 { (p_target / p_draft).min(1.0) } else { 0.0 };
+            let accept_prob = if p_draft > 0.0 {
+                (p_target / p_draft).min(1.0)
+            } else {
+                0.0
+            };
             let r = rng.next_f32();
 
             if r < accept_prob {
                 // Accept this draft token
                 generated_tokens.push(draft_tokens[k]);
                 n_accepted += 1;
-                debug!("Accept draft token {} (p_t={:.4}, p_d={:.4}, ratio={:.4})",
-                    draft_tokens[k], p_target, p_draft, accept_prob);
+                debug!(
+                    "Accept draft token {} (p_t={:.4}, p_d={:.4}, ratio={:.4})",
+                    draft_tokens[k], p_target, p_draft, accept_prob
+                );
             } else {
                 // Reject — resample from adjusted distribution: max(0, p_target - p_draft)
-                debug!("Reject draft token {} at position {} (p_t={:.4}, p_d={:.4})",
-                    draft_tokens[k], k, p_target, p_draft);
+                debug!(
+                    "Reject draft token {} at position {} (p_t={:.4}, p_d={:.4})",
+                    draft_tokens[k], k, p_target, p_draft
+                );
 
-                let mut adjusted: Vec<f32> = target_probs.iter().zip(draft_probs.iter())
+                let mut adjusted: Vec<f32> = target_probs
+                    .iter()
+                    .zip(draft_probs.iter())
                     .map(|(&pt, &pd)| (pt - pd).max(0.0))
                     .collect();
                 let adj_sum: f32 = adjusted.iter().sum();
                 if adj_sum > 0.0 {
-                    for p in adjusted.iter_mut() { *p /= adj_sum; }
+                    for p in adjusted.iter_mut() {
+                        *p /= adj_sum;
+                    }
                 } else {
                     // Fallback to target distribution
                     adjusted = target_probs.clone();
@@ -491,13 +566,19 @@ pub fn generate_speculative(
         // Update adaptive drafter with this round's results
         if config.adaptive {
             drafter.update(draft_tokens.len(), n_accepted.min(draft_tokens.len()));
-            debug!("Adaptive K: {} (acceptance EMA: {:.2})", drafter.k(), drafter.acceptance_rate());
+            debug!(
+                "Adaptive K: {} (acceptance EMA: {:.2})",
+                drafter.k(),
+                drafter.acceptance_rate()
+            );
         }
 
         // Rollback KV caches to only include accepted positions
-        let accepted_positions = pos + generated_tokens.len() - (generated_tokens.len().saturating_sub(
-            generated_tokens.len() - (generated_tokens.len() - n_accepted.min(generated_tokens.len()))
-        ));
+        let _accepted_positions = pos + generated_tokens.len()
+            - (generated_tokens.len().saturating_sub(
+                generated_tokens.len()
+                    - (generated_tokens.len() - n_accepted.min(generated_tokens.len())),
+            ));
         // Simpler: we know how many tokens we just added
         let new_total_pos = prompt_len + generated_tokens.len();
         // Rollback both KV caches to match actual accepted length
@@ -513,8 +594,13 @@ pub fn generate_speculative(
                 generated_tokens[i - prompt_len]
             };
             let _ = forward_single(
-                draft_gguf, draft_streamer, draft_cache, &mut draft_kv,
-                tok, i, &draft_prefetcher,
+                draft_gguf,
+                draft_streamer,
+                draft_cache,
+                &mut draft_kv,
+                tok,
+                i,
+                &draft_prefetcher,
             );
         }
 
@@ -545,16 +631,24 @@ pub fn generate_speculative(
 
     info!(
         "Speculative decode: {} tokens in {:.2}ms ({:.1} tok/s)",
-        token_count, decode_time.as_millis(), tokens_per_sec
+        token_count,
+        decode_time.as_millis(),
+        tokens_per_sec
     );
     info!(
         "Draft: {}/{} accepted ({:.1}%), target passes: {} (vs {} without speculation)",
-        draft_accepted, draft_total, acceptance_rate * 100.0,
-        target_passes, token_count
+        draft_accepted,
+        draft_total,
+        acceptance_rate * 100.0,
+        target_passes,
+        token_count
     );
     if config.adaptive {
-        info!("Adaptive draft length: final K={}, EMA acceptance={:.2}",
-            drafter.k(), drafter.acceptance_rate());
+        info!(
+            "Adaptive draft length: final K={}, EMA acceptance={:.2}",
+            drafter.k(),
+            drafter.acceptance_rate()
+        );
     }
 
     let text = tokenizer.decode(&generated_tokens);
@@ -653,20 +747,33 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
         let draft_kv_start = self.draft_kv.seq_len();
 
         // Draft K tokens (adaptive or fixed)
-        let current_k = if self.adaptive { self.drafter.k() } else { self.draft_ahead };
+        let current_k = if self.adaptive {
+            self.drafter.k()
+        } else {
+            self.draft_ahead
+        };
         let mut draft_tokens = Vec::with_capacity(current_k);
         let mut draft_logits_list = Vec::with_capacity(current_k);
         let mut current_token = self.last_token;
 
         for k in 0..current_k {
-            if self.draft_kv.is_full() { break; }
+            if self.draft_kv.is_full() {
+                break;
+            }
             let (logits, _) = forward_single(
-                self.draft_gguf, self.draft_streamer, self.draft_cache, &mut self.draft_kv,
-                current_token, self.position + k, &self.draft_prefetcher,
+                self.draft_gguf,
+                self.draft_streamer,
+                self.draft_cache,
+                &mut self.draft_kv,
+                current_token,
+                self.position + k,
+                &self.draft_prefetcher,
             )?;
             let probs = logits_to_probs(&logits[..self.vocab_size], self.temperature);
             let token_id = sample_from_probs(&probs, &mut self.rng);
-            if token_id == self.tokenizer.eos_id || token_id == 0 { break; }
+            if token_id == self.tokenizer.eos_id || token_id == 0 {
+                break;
+            }
             draft_tokens.push(token_id);
             draft_logits_list.push(logits);
             current_token = token_id;
@@ -677,13 +784,23 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
         if draft_tokens.is_empty() {
             // No draft tokens — do single target pass
             let (target_logits, _) = forward_single(
-                self.target_gguf, self.target_streamer, self.target_cache, &mut self.target_kv,
-                self.last_token, self.position, &self.target_prefetcher,
+                self.target_gguf,
+                self.target_streamer,
+                self.target_cache,
+                &mut self.target_kv,
+                self.last_token,
+                self.position,
+                &self.target_prefetcher,
             )?;
             self.target_passes += 1;
             let _ = forward_single(
-                self.draft_gguf, self.draft_streamer, self.draft_cache, &mut self.draft_kv,
-                self.last_token, self.position, &self.draft_prefetcher,
+                self.draft_gguf,
+                self.draft_streamer,
+                self.draft_cache,
+                &mut self.draft_kv,
+                self.last_token,
+                self.position,
+                &self.draft_prefetcher,
             );
             let probs = logits_to_probs(&target_logits[..self.vocab_size], self.temperature);
             let token_id = sample_from_probs(&probs, &mut self.rng);
@@ -699,16 +816,26 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
         // Verify with target model
         let mut target_logits_list = Vec::with_capacity(draft_tokens.len() + 1);
         let (logits_0, _) = forward_single(
-            self.target_gguf, self.target_streamer, self.target_cache, &mut self.target_kv,
-            self.last_token, self.position, &self.target_prefetcher,
+            self.target_gguf,
+            self.target_streamer,
+            self.target_cache,
+            &mut self.target_kv,
+            self.last_token,
+            self.position,
+            &self.target_prefetcher,
         )?;
         target_logits_list.push(logits_0);
         self.target_passes += 1;
 
         for (k, &draft_tok) in draft_tokens.iter().enumerate() {
             let (logits, _) = forward_single(
-                self.target_gguf, self.target_streamer, self.target_cache, &mut self.target_kv,
-                draft_tok, self.position + 1 + k, &self.target_prefetcher,
+                self.target_gguf,
+                self.target_streamer,
+                self.target_cache,
+                &mut self.target_kv,
+                draft_tok,
+                self.position + 1 + k,
+                &self.target_prefetcher,
             )?;
             target_logits_list.push(logits);
             self.target_passes += 1;
@@ -717,11 +844,21 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
         // Accept/reject
         let mut n_accepted = 0usize;
         for k in 0..draft_tokens.len() {
-            let draft_probs = logits_to_probs(&draft_logits_list[k][..self.vocab_size], self.temperature);
-            let target_probs = logits_to_probs(&target_logits_list[k][..self.vocab_size], self.temperature);
+            let draft_probs =
+                logits_to_probs(&draft_logits_list[k][..self.vocab_size], self.temperature);
+            let target_probs =
+                logits_to_probs(&target_logits_list[k][..self.vocab_size], self.temperature);
             let token = draft_tokens[k] as usize;
-            let p_d = if token < draft_probs.len() { draft_probs[token] } else { 0.0 };
-            let p_t = if token < target_probs.len() { target_probs[token] } else { 0.0 };
+            let p_d = if token < draft_probs.len() {
+                draft_probs[token]
+            } else {
+                0.0
+            };
+            let p_t = if token < target_probs.len() {
+                target_probs[token]
+            } else {
+                0.0
+            };
             let accept_prob = if p_d > 0.0 { (p_t / p_d).min(1.0) } else { 0.0 };
 
             if self.rng.next_f32() < accept_prob {
@@ -729,12 +866,19 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
                 n_accepted += 1;
             } else {
                 // Reject and resample
-                let mut adjusted: Vec<f32> = target_probs.iter().zip(draft_probs.iter())
+                let mut adjusted: Vec<f32> = target_probs
+                    .iter()
+                    .zip(draft_probs.iter())
                     .map(|(&pt, &pd)| (pt - pd).max(0.0))
                     .collect();
                 let s: f32 = adjusted.iter().sum();
-                if s > 0.0 { for p in adjusted.iter_mut() { *p /= s; } }
-                else { adjusted = target_probs; }
+                if s > 0.0 {
+                    for p in adjusted.iter_mut() {
+                        *p /= s;
+                    }
+                } else {
+                    adjusted = target_probs;
+                }
                 let resampled = sample_from_probs(&adjusted, &mut self.rng);
                 if resampled != self.tokenizer.eos_id && resampled != 0 {
                     self.pending_tokens.push(resampled);
@@ -759,7 +903,8 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
 
         // Update adaptive drafter
         if self.adaptive {
-            self.drafter.update(draft_tokens.len(), n_accepted.min(draft_tokens.len()));
+            self.drafter
+                .update(draft_tokens.len(), n_accepted.min(draft_tokens.len()));
         }
 
         // Update state
@@ -785,8 +930,13 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
                 self.all_generated[i - self.prompt_len]
             };
             let _ = forward_single(
-                self.draft_gguf, self.draft_streamer, self.draft_cache, &mut self.draft_kv,
-                tok, i, &self.draft_prefetcher,
+                self.draft_gguf,
+                self.draft_streamer,
+                self.draft_cache,
+                &mut self.draft_kv,
+                tok,
+                i,
+                &self.draft_prefetcher,
             );
         }
 
@@ -835,12 +985,22 @@ pub fn generate_speculative_streaming<'a>(
     // Prefill both
     for (pos, &token_id) in tokens.iter().enumerate() {
         forward_single(
-            target_gguf, target_streamer, target_cache, &mut target_kv,
-            token_id, pos, &target_prefetcher,
+            target_gguf,
+            target_streamer,
+            target_cache,
+            &mut target_kv,
+            token_id,
+            pos,
+            &target_prefetcher,
         )?;
         forward_single(
-            draft_gguf, draft_streamer, draft_cache, &mut draft_kv,
-            token_id, pos, &draft_prefetcher,
+            draft_gguf,
+            draft_streamer,
+            draft_cache,
+            &mut draft_kv,
+            token_id,
+            pos,
+            &draft_prefetcher,
         )?;
     }
 
@@ -887,7 +1047,11 @@ mod tests {
         let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let probs = logits_to_probs(&logits, 1.0);
         let sum: f32 = probs.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-5, "Probs should sum to 1.0, got {}", sum);
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "Probs should sum to 1.0, got {}",
+            sum
+        );
     }
 
     #[test]
@@ -928,7 +1092,11 @@ mod tests {
         for _ in 0..5 {
             drafter.update(5, 5); // 100% acceptance
         }
-        assert!(drafter.k() > 5, "K should increase with high acceptance, got {}", drafter.k());
+        assert!(
+            drafter.k() > 5,
+            "K should increase with high acceptance, got {}",
+            drafter.k()
+        );
     }
 
     #[test]
@@ -938,7 +1106,11 @@ mod tests {
         for _ in 0..5 {
             drafter.update(5, 1); // 20% acceptance
         }
-        assert!(drafter.k() < 5, "K should decrease with low acceptance, got {}", drafter.k());
+        assert!(
+            drafter.k() < 5,
+            "K should decrease with low acceptance, got {}",
+            drafter.k()
+        );
     }
 
     #[test]

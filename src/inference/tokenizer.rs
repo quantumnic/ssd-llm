@@ -92,16 +92,25 @@ impl SimpleTokenizer {
             // SentencePiece-style: use token scores as merge priority
             // Build merge rules from vocabulary scores
             has_merges = true;
-            debug!("Using SentencePiece score-based BPE ({} tokens with scores)", token_scores.len());
+            debug!(
+                "Using SentencePiece score-based BPE ({} tokens with scores)",
+                token_scores.len()
+            );
         }
 
-        let bos_id = gguf.metadata.get("tokenizer.ggml.bos_token_id")
+        let bos_id = gguf
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
             .and_then(|v| v.as_u32())
             .unwrap_or(1);
-        let eos_id = gguf.metadata.get("tokenizer.ggml.eos_token_id")
+        let eos_id = gguf
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
             .and_then(|v| v.as_u32())
             .unwrap_or(2);
-        let add_bos = gguf.metadata.get("tokenizer.ggml.add_bos_token")
+        let add_bos = gguf
+            .metadata
+            .get("tokenizer.ggml.add_bos_token")
             .and_then(|v| match v {
                 MetadataValue::Bool(b) => Some(*b),
                 _ => None,
@@ -229,7 +238,11 @@ impl SimpleTokenizer {
             for i in 0..symbols.len() - 1 {
                 let merged = format!("{}{}", symbols[i], symbols[i + 1]);
                 if let Some(&id) = self.token_to_id.get(&merged) {
-                    let score = self.token_scores.get(id as usize).copied().unwrap_or(f32::NEG_INFINITY);
+                    let score = self
+                        .token_scores
+                        .get(id as usize)
+                        .copied()
+                        .unwrap_or(f32::NEG_INFINITY);
                     if score > best_score {
                         best_score = score;
                         best_idx = i;
@@ -359,9 +372,17 @@ mod tests {
 
     fn make_test_tokenizer() -> SimpleTokenizer {
         let mut id_to_token = vec![
-            "<unk>".to_string(), "<s>".to_string(), "</s>".to_string(),
-            "▁".to_string(), "h".to_string(), "e".to_string(), "l".to_string(),
-            "o".to_string(), "▁he".to_string(), "ll".to_string(), "▁hello".to_string(),
+            "<unk>".to_string(),
+            "<s>".to_string(),
+            "</s>".to_string(),
+            "▁".to_string(),
+            "h".to_string(),
+            "e".to_string(),
+            "l".to_string(),
+            "o".to_string(),
+            "▁he".to_string(),
+            "ll".to_string(),
+            "▁hello".to_string(),
         ];
         let mut token_to_id = HashMap::new();
         for (i, t) in id_to_token.iter().enumerate() {
@@ -392,7 +413,11 @@ mod tests {
         assert!(tokens.len() > 1, "Should produce tokens beyond BOS");
         // All non-BOS tokens should be valid vocab IDs
         for &id in &tokens[1..] {
-            assert!((id as usize) < tok.vocab_size(), "Token ID {} out of range", id);
+            assert!(
+                (id as usize) < tok.vocab_size(),
+                "Token ID {} out of range",
+                id
+            );
         }
     }
 

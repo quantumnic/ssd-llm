@@ -111,15 +111,15 @@ pub fn multi_head_attention(
     apply_rope_inplace(&mut q, head_dim, n_head, position);
     apply_rope_inplace(&mut k, head_dim, n_head_kv, position);
 
-    let scale = 1.0 / (head_dim as f32).sqrt();
+    let _scale = 1.0 / (head_dim as f32).sqrt();
     let kv_group_size = (n_head / n_head_kv).max(1);
 
     let mut attn_output = vec![0.0f32; n_embd];
 
     for h in 0..n_head {
         let kv_h = h / kv_group_size;
-        let q_start = h * head_dim;
-        let k_start = kv_h * head_dim;
+        let _q_start = h * head_dim;
+        let _k_start = kv_h * head_dim;
         let v_start = kv_h * head_dim;
 
         // Single-token: softmax of one value = 1.0 → output = V
@@ -177,7 +177,10 @@ mod tests {
         apply_rope_inplace(&mut x, 4, 1, 0);
         // At position 0, angle = 0, so cos=1, sin=0 → identity
         for i in 0..4 {
-            assert!((x[i] - orig[i]).abs() < 1e-6, "RoPE at pos 0 should be identity");
+            assert!(
+                (x[i] - orig[i]).abs() < 1e-6,
+                "RoPE at pos 0 should be identity"
+            );
         }
     }
 
@@ -192,10 +195,14 @@ mod tests {
         let x = vec![1.0f32; n_embd];
         let w = vec![0.01f32; n_embd * n_embd]; // simple weight
 
-        let _ = multi_head_attention_cached(&x, &w, &w, &w, &w, n_head, n_head_kv, head_dim, 0, &mut kv);
+        let _ = multi_head_attention_cached(
+            &x, &w, &w, &w, &w, n_head, n_head_kv, head_dim, 0, &mut kv,
+        );
         assert_eq!(kv.seq_len(), 1);
 
-        let _ = multi_head_attention_cached(&x, &w, &w, &w, &w, n_head, n_head_kv, head_dim, 1, &mut kv);
+        let _ = multi_head_attention_cached(
+            &x, &w, &w, &w, &w, n_head, n_head_kv, head_dim, 1, &mut kv,
+        );
         assert_eq!(kv.seq_len(), 2);
     }
 }
