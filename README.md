@@ -41,6 +41,9 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🎯 Speculative Decoding** — Use a small draft model to propose tokens, verified by the target model for 2-3x speedup
 - **📦 Batch Prefill** — Layer-major prompt processing: each layer loaded once for all prompt tokens, minimizing SSD reads
 - **🎛️ Adaptive Draft Length** — Dynamically adjusts speculation depth K based on rolling acceptance rate
+- **📦 Prompt Prefix Caching** — Reuse KV cache states for repeated prompt prefixes (system prompts, templates)
+- **🔄 Continuous Batching** — Handle multiple concurrent requests, share layer loads across sequences
+- **🔀 Tensor Parallelism** — Split matmul across multiple threads for better GPU/CPU utilization
 
 ## Quick Start
 
@@ -68,6 +71,15 @@ ssd-llm run model-70b.gguf --draft-model model-1b.gguf --prompt "Hello" --adapti
 
 # Serve with speculative decoding
 ssd-llm serve model-70b.gguf --draft-model model-1b.gguf --memory-budget 8G
+
+# Enable prompt prefix caching (reuse KV states across requests)
+ssd-llm run model.gguf --prompt "Hello" --prompt-cache
+
+# Tensor parallelism (auto-detected or manual)
+ssd-llm run model-70b.gguf --prompt "Hello" --tensor-parallel 4
+
+# Continuous batching server (handles 8 concurrent requests)
+ssd-llm serve model.gguf --memory-budget 8G --max-batch 8 --prompt-cache
 ```
 
 ## API Server
@@ -147,6 +159,9 @@ Run `ssd-llm bench` on your machine to get actual numbers.
 | Memory Budget | ✅ Configurable | ❌ | ❌ |
 | Layer-level Cache | ✅ LRU + pinning | ❌ | ❌ |
 | Speculative Decoding | ✅ Draft model | ✅ (v0.6+) | ❌ |
+| Continuous Batching | ✅ Layer-major | ✅ | ✅ |
+| Prompt Caching | ✅ Prefix matching | ❌ | ❌ |
+| Tensor Parallelism | ✅ Multi-thread | ✅ | ✅ (via llama.cpp) |
 | Metal GPU | ✅ Shaders + SIMD | ✅ | ✅ (via llama.cpp) |
 | GGUF Support | ✅ | ✅ | ✅ |
 | Quantization | Q4_0, Q8_0, F16 | All | All |
@@ -169,6 +184,9 @@ src/
     sampler.rs         — Temperature, Top-K, Top-P sampling (xorshift64)
     speculative.rs     — Speculative decoding engine (draft + verify)
     tokenizer.rs       — BPE tokenizer with SentencePiece support
+    prompt_cache.rs    — Prompt prefix KV state caching
+    batch_scheduler.rs — Continuous batching scheduler
+    tensor_parallel.rs — Multi-threaded tensor parallelism
   metal/
     compute.rs         — Metal compute + SIMD-optimized ops (auto GPU dispatch)
     gpu.rs             — metal-rs GPU pipeline (real Metal compute)
@@ -227,7 +245,8 @@ This project builds on insights from:
 - [x] v0.4 — Full Metal GPU dispatch via metal-rs, BPE tokenizer, streaming responses
 - [x] v0.5 — Speculative decoding with draft model, KV cache rollback
 - [x] v0.6 — Batch prefill optimization, adaptive draft length
-- [ ] v0.7 — Continuous batching, prompt caching, tensor parallelism
+- [x] v0.7 — Continuous batching, prompt caching, tensor parallelism
+- [ ] v0.8 — Sliding window attention, GQA optimization, memory-mapped KV cache
 - [ ] v1.0 — Production-ready, benchmarked against llama.cpp
 
 ## Requirements

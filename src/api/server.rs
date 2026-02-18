@@ -30,6 +30,9 @@ pub struct ServerConfig {
     pub draft_model_path: Option<PathBuf>,
     pub draft_ahead: usize,
     pub adaptive_draft: bool,
+    pub prompt_cache: bool,
+    pub max_batch: usize,
+    pub tensor_parallel: usize,
 }
 
 /// Model context shared across requests
@@ -138,7 +141,7 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("POST", "/api/chat") => handle_chat(&mut stream, ctx, &body_str),
         ("POST", "/v1/chat/completions") => handle_openai_chat(&mut stream, ctx, &body_str),
         ("GET", "/") => send_json_response(&mut stream, 200,
-            r#"{"status":"ssd-llm is running","version":"0.6.0"}"#),
+            r#"{"status":"ssd-llm is running","version":"0.7.0"}"#),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
 }
@@ -156,7 +159,7 @@ fn handle_tags(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result
 }
 
 fn handle_version(stream: &mut TcpStream) -> Result<()> {
-    send_json_response(stream, 200, r#"{"version":"0.5.0-ssd-llm"}"#)
+    send_json_response(stream, 200, r#"{"version":"0.7.0-ssd-llm"}"#)
 }
 
 fn handle_generate(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &str) -> Result<()> {

@@ -1,7 +1,10 @@
 pub mod attention;
+pub mod batch_scheduler;
 pub mod feed_forward;
 pub mod kv_cache;
+pub mod prompt_cache;
 pub mod sampler;
 pub mod speculative;
+pub mod tensor_parallel;
 pub mod tokenizer;
 pub mod transformer;

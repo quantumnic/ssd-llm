@@ -60,6 +60,14 @@ enum Commands {
         /// Enable adaptive draft length (adjusts K based on acceptance rate)
         #[arg(long, default_value_t = false)]
         adaptive_draft: bool,
+
+        /// Enable prompt prefix caching (reuse KV states for repeated prefixes)
+        #[arg(long, default_value_t = false)]
+        prompt_cache: bool,
+
+        /// Number of tensor parallel shards (0 = auto-detect)
+        #[arg(long, default_value_t = 0)]
+        tensor_parallel: usize,
     },
     /// Show model info from GGUF file
     Info {
@@ -103,6 +111,18 @@ enum Commands {
         /// Enable adaptive draft length
         #[arg(long, default_value_t = false)]
         adaptive_draft: bool,
+
+        /// Enable prompt prefix caching
+        #[arg(long, default_value_t = false)]
+        prompt_cache: bool,
+
+        /// Maximum concurrent requests for continuous batching (0 = sequential)
+        #[arg(long, default_value_t = 4)]
+        max_batch: usize,
+
+        /// Number of tensor parallel shards (0 = auto-detect)
+        #[arg(long, default_value_t = 0)]
+        tensor_parallel: usize,
     },
 }
 
@@ -190,6 +210,8 @@ fn main() -> Result<()> {
             draft_model,
             draft_ahead,
             adaptive_draft,
+            prompt_cache,
+            tensor_parallel,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
@@ -215,6 +237,19 @@ fn main() -> Result<()> {
                 top_p,
                 max_tokens,
             };
+
+            // Tensor parallelism
+            let tp_shards = if tensor_parallel > 0 { tensor_parallel }
+                else { inference::tensor_parallel::auto_detect_shards(gguf.n_embd() as usize) };
+            if tp_shards > 1 {
+                println!("🔀 Tensor parallelism: {} shards", tp_shards);
+            }
+
+            // Prompt caching
+            let mut pcache = if prompt_cache {
+                println!("📦 Prompt prefix caching enabled");
+                Some(inference::prompt_cache::PromptCache::new(budget / 4))
+            } else { None };
 
             println!("\nPrompt: {}", prompt);
             println!("---");
@@ -284,8 +319,10 @@ fn main() -> Result<()> {
             benchmark::run_benchmark(&model, budget)?;
         }
 
-        Commands::Serve { model, memory_budget, host, port, draft_model, draft_ahead, adaptive_draft } => {
+        Commands::Serve { model, memory_budget, host, port, draft_model, draft_ahead, adaptive_draft, prompt_cache, max_batch, tensor_parallel } => {
             let budget = parse_memory_budget(&memory_budget)?;
+            let tp_shards = if tensor_parallel > 0 { tensor_parallel }
+                else { inference::tensor_parallel::auto_detect_shards(budget) };
             let server = api::server::ApiServer::new(api::server::ServerConfig {
                 host,
                 port,
@@ -294,6 +331,9 @@ fn main() -> Result<()> {
                 draft_model_path: draft_model,
                 draft_ahead,
                 adaptive_draft,
+                prompt_cache,
+                max_batch,
+                tensor_parallel: tp_shards,
             });
             server.run()?;
         }

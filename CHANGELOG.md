@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.7.0 — Continuous Batching + Prompt Caching + Tensor Parallelism (2026-02-18)
+
+### Added
+- **Prompt prefix caching** (`inference/prompt_cache.rs`):
+  - Hash-trie based KV state cache keyed on token sequences
+  - Exact prefix matching: skip prefill entirely when the same prompt is reused
+  - Partial prefix matching: find the longest cached prefix and resume prefill from there
+  - LRU eviction with configurable memory budget (default: 25% of model budget)
+  - FNV-1a hashing for fast token sequence lookups
+  - `--prompt-cache` CLI flag for `run` and `serve` commands
+- **Continuous batching scheduler** (`inference/batch_scheduler.rs`):
+  - Layer-major batching: load each layer once, apply to ALL active sequences
+  - Dynamic request scheduling: queued → prefilling → decoding → completed
+  - Configurable max batch size (`--max-batch`, default: 4 for serve)
+  - Per-request KV cache isolation for correct parallel generation
+  - Automatic prefill-to-decode promotion within batch steps
+  - Throughput stats tracking (total requests, total tokens generated)
+- **Tensor parallelism** (`inference/tensor_parallel.rs`):
+  - Column-parallel matmul: splits output dimension across N threads
+  - 4-wide SIMD accumulation per thread for cache-friendly computation
+  - Parallel FFN: gate and up projections computed concurrently
+  - Auto-detection of optimal shard count based on model dimensions:
+    - 1 shard for small models (<4096 embd)
+    - 2 shards for 7B-13B models (4096 embd)
+    - 4 shards for 70B+ models (8192+ embd)
+  - `--tensor-parallel <N>` CLI flag (0 = auto-detect)
+- 10 new tests: prompt cache (store/lookup/partial hit/eviction), batch scheduler (submit/max batch), tensor parallelism (correctness/single shard/auto detect/large matrix)
+- 36 tests total, all passing
+
+### Why Prompt Caching Matters for SSD-LLM
+The most expensive part of SSD-streaming inference is prefill — processing the prompt through all layers requires loading every layer from SSD. With prompt caching, repeated prompts (common with system prompts, templates, multi-turn conversations) skip this entirely by reusing the stored KV state. Partial matches save proportional I/O.
+
+### Why Continuous Batching Matters for SSD-LLM
+The core bottleneck is SSD→RAM layer loading. With continuous batching, each layer is loaded once per step and applied to ALL active sequences. 4 concurrent requests means 4x better SSD bandwidth utilization — the same layer data serves multiple computations before being evicted.
+
+### Why Tensor Parallelism Matters for SSD-LLM
+While SSD I/O is the primary bottleneck, large matmul operations (especially vocab projection) are compute-bound. Splitting these across threads better utilizes Apple Silicon's multi-core CPU, hiding compute latency behind I/O wait time.
+
+### Changed
+- CLI: `run` gains `--prompt-cache` and `--tensor-parallel` flags
+- CLI: `serve` gains `--prompt-cache`, `--max-batch`, `--tensor-parallel` flags
+- `ServerConfig` extended with `prompt_cache`, `max_batch`, `tensor_parallel` fields
+- API server version bumped to 0.7.0
+- Cargo.toml version bumped to 0.7.0
+- README: updated features, architecture, comparison table, roadmap
+
 ## v0.6.0 — Batch Prefill + Adaptive Draft Length (2026-02-18)
 
 ### Added
