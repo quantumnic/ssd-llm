@@ -3,6 +3,7 @@ mod inference;
 mod ssd;
 mod api;
 mod benchmark;
+mod metal;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -53,7 +54,7 @@ enum Commands {
         /// Path to GGUF model file
         model: PathBuf,
     },
-    /// Benchmark SSD streaming performance
+    /// Benchmark SSD streaming and inference throughput
     Bench {
         /// Path to GGUF model file
         model: PathBuf,
@@ -61,6 +62,23 @@ enum Commands {
         /// Memory budget
         #[arg(long, default_value = "8G")]
         memory_budget: String,
+    },
+    /// Start Ollama-compatible API server
+    Serve {
+        /// Path to GGUF model file
+        model: PathBuf,
+
+        /// Memory budget for layer cache
+        #[arg(long, default_value = "8G")]
+        memory_budget: String,
+
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(long, default_value_t = 11434)]
+        port: u16,
     },
 }
 
@@ -79,14 +97,31 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
+    // Check Metal availability on startup
+    if metal::compute::MetalCompute::is_available() {
+        println!("✓ Metal GPU acceleration available");
+    } else {
+        println!("⚠ Metal not available, using CPU only");
+    }
+
     match cli.command {
         Commands::Info { model } => {
             let gguf = model::gguf::GgufFile::open(&model)?;
             println!("=== GGUF Model Info ===");
             println!("Magic: GGUF v{}", gguf.header.version);
+            println!("Architecture: {}", gguf.architecture());
             println!("Tensors: {}", gguf.header.tensor_count);
             println!("Metadata entries: {}", gguf.header.metadata_kv_count);
             println!("File size: {:.2} GB", gguf.file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+            println!();
+
+            println!("=== Architecture ===");
+            println!("  Layers: {}", gguf.n_layers());
+            println!("  Embedding dim: {}", gguf.n_embd());
+            println!("  Attention heads: {}", gguf.n_head());
+            println!("  KV heads: {}", gguf.n_head_kv());
+            println!("  Context length: {}", gguf.n_ctx());
+            println!("  Vocab size: {}", gguf.vocab_size());
             println!();
 
             println!("=== Metadata ===");
@@ -173,6 +208,17 @@ fn main() -> Result<()> {
         Commands::Bench { model, memory_budget } => {
             let budget = parse_memory_budget(&memory_budget)?;
             benchmark::run_benchmark(&model, budget)?;
+        }
+
+        Commands::Serve { model, memory_budget, host, port } => {
+            let budget = parse_memory_budget(&memory_budget)?;
+            let server = api::server::ApiServer::new(api::server::ServerConfig {
+                host,
+                port,
+                model_path: model,
+                memory_budget: budget,
+            });
+            server.run()?;
         }
     }
 

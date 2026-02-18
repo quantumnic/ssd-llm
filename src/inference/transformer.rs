@@ -110,20 +110,9 @@ fn find_tensor_in_layer<'a>(cached: &'a CachedLayer, suffix: &str, layer_idx: u3
     cached.tensors.get(&full_name)
 }
 
-/// RMS Normalization in-place
+/// RMS Normalization in-place (uses optimized Metal compute path)
 fn rms_norm(x: &mut Vec<f32>, weight: &[f32]) {
-    let n = x.len();
-    let eps = 1e-5f32;
-
-    // Calculate RMS
-    let sum_sq: f32 = x.iter().map(|v| v * v).sum();
-    let rms = (sum_sq / n as f32 + eps).sqrt();
-    let inv_rms = 1.0 / rms;
-
-    // Normalize and apply weight
-    for (i, val) in x.iter_mut().enumerate() {
-        *val = *val * inv_rms * weight.get(i).copied().unwrap_or(1.0);
-    }
+    crate::metal::compute::rmsnorm_f32_fast(x, weight, 1e-5);
 }
 
 /// Generate text token by token

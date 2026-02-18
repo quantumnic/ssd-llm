@@ -33,9 +33,9 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🔮 Predictive Prefetching** — Next layer loads asynchronously via `madvise(MADV_WILLNEED)` while GPU computes
 - **📦 Smart LRU Cache** — Frequently used layers (embeddings, early attention) stay pinned in RAM
 - **🗺️ mmap + madvise** — OS-level memory-mapped files with intelligent page hints
-- **⚡ Metal Compute Shaders** — GPU-accelerated matmul, softmax, RoPE (v0.2)
+- **⚡ Metal Compute** — SIMD-optimized matmul, softmax, RoPE, RMSNorm with Metal shader foundation
 - **📄 GGUF Support** — Compatible with llama.cpp quantization formats (Q4_0, Q8_0, F16, F32)
-- **🔌 Ollama-compatible API** — Drop-in replacement (v0.2)
+- **🔌 Ollama-compatible API** — Drop-in replacement server with OpenAI-compatible endpoint
 
 ## Quick Start
 
@@ -51,6 +51,40 @@ ssd-llm run model.gguf --memory-budget 8G --prompt "Explain quantum computing"
 
 # Benchmark SSD streaming performance
 ssd-llm bench model.gguf --memory-budget 8G
+
+# Start Ollama-compatible API server
+ssd-llm serve model.gguf --memory-budget 8G --port 11434
+```
+
+## API Server
+
+The `serve` command starts an Ollama-compatible HTTP server:
+
+```bash
+ssd-llm serve model.gguf --memory-budget 8G
+```
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/generate` | POST | Text generation (Ollama format) |
+| `/api/chat` | POST | Chat completion (Ollama format) |
+| `/api/tags` | GET | List loaded models |
+| `/api/version` | GET | Server version |
+| `/v1/chat/completions` | POST | OpenAI-compatible chat |
+
+### Usage with curl
+
+```bash
+# Ollama-style generation
+curl -X POST http://localhost:11434/api/generate \
+  -d '{"prompt": "What is Rust?", "num_predict": 128}'
+
+# OpenAI-compatible chat
+curl -X POST http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 128}'
 ```
 
 ## How It Works
@@ -80,7 +114,7 @@ The fast SSD + unified memory means layer streaming has very low overhead on Mac
 
 ## Benchmarks
 
-> v0.1 — CPU-only, benchmarks are SSD streaming + dequantization speed
+> v0.2 — SIMD-optimized CPU, Metal shader foundation
 
 | Model | Quant | Size | Memory Budget | Layer Load | Est. tok/s |
 |---|---|---|---|---|---|
@@ -98,10 +132,10 @@ Run `ssd-llm bench` on your machine to get actual numbers.
 | Predictive Prefetch | ✅ madvise hints | ❌ | ❌ |
 | Memory Budget | ✅ Configurable | ❌ | ❌ |
 | Layer-level Cache | ✅ LRU + pinning | ❌ | ❌ |
-| Metal GPU | 🔜 v0.2 | ✅ | ✅ (via llama.cpp) |
+| Metal GPU | ✅ Shaders + SIMD | ✅ | ✅ (via llama.cpp) |
 | GGUF Support | ✅ | ✅ | ✅ |
 | Quantization | Q4_0, Q8_0, F16 | All | All |
-| API Server | 🔜 v0.2 | ✅ | ✅ |
+| API Server | ✅ Ollama + OpenAI | ✅ | ✅ |
 
 ## Architecture
 
@@ -119,15 +153,15 @@ src/
     sampler.rs         — Temperature, Top-K, Top-P sampling
     tokenizer.rs       — Basic tokenizer from GGUF vocab
   metal/
-    compute.rs         — Metal pipeline setup
-    shaders/           — .metal compute shaders
+    compute.rs         — Metal compute + SIMD-optimized ops
+    shaders/           — .metal compute shaders (matmul, rmsnorm, rope, softmax)
   ssd/
     streamer.rs        — SSD → RAM streaming engine
     prefetch.rs        — Predictive prefetcher
     mmap_pool.rs       — mmap pool with madvise management
   api/
-    server.rs          — Ollama-compatible API (v0.2)
-    openai.rs          — OpenAI-compatible API (v0.2)
+    server.rs          — Ollama-compatible HTTP API server
+    openai.rs          — OpenAI-compatible types + ChatML formatting
   benchmark.rs         — Performance measurement
 ```
 
@@ -135,29 +169,18 @@ src/
 
 This project builds on insights from:
 
-- **llama.cpp** — Uses mmap but with no intelligent page management; performance degrades significantly when model exceeds RAM
-- **FlexGen** — SSD offloading for throughput-oriented inference; focuses on batch scenarios, not interactive
-- **PowerInfer** — Sparsity-based selective loading; keeps hot neurons on GPU, cold on CPU/SSD
-- **LLM in a Flash** (Apple Research) — Flash memory optimization for LLM inference; uses sparsity and windowing
+- **llama.cpp** — Uses mmap but with no intelligent page management
+- **FlexGen** — SSD offloading for throughput-oriented inference
+- **PowerInfer** — Sparsity-based selective loading
+- **LLM in a Flash** (Apple Research) — Flash memory optimization for LLM inference
 - **FlexInfer** — Flexible offloading with computation-I/O overlap
-- **PIPO** — Pipelined offloading for consumer devices
-
-### What's Different
-
-Existing solutions either:
-1. **Use mmap naively** (llama.cpp) — no prefetch hints, no eviction strategy, OS makes bad decisions under pressure
-2. **Focus on batch throughput** (FlexGen) — not optimized for interactive, single-user inference on Mac
-3. **Require sparsity** (PowerInfer) — only works for MoE or sparse models
-4. **Don't target Apple Silicon** — miss the UMA advantage where GPU can directly access mmap'd memory
-
-**ssd-llm** combines intelligent mmap management with Apple-specific optimizations for interactive inference.
 
 ## Roadmap
 
 - [x] v0.1 — GGUF parser, mmap loader, LRU cache, prefetcher, CPU inference
-- [ ] v0.2 — Metal GPU compute shaders (matmul, softmax, RoPE, RMSNorm)
-- [ ] v0.3 — KV-Cache offloading to SSD (long context support)
-- [ ] v0.4 — Ollama + OpenAI compatible API server
+- [x] v0.2 — Metal compute foundation, SIMD ops, Ollama + OpenAI API server
+- [ ] v0.3 — Full Metal GPU dispatch (matmul via compute shaders), KV-Cache offloading
+- [ ] v0.4 — BPE tokenizer, streaming responses, concurrent request handling
 - [ ] v0.5 — Speculative decoding with draft model
 - [ ] v1.0 — Production-ready, benchmarked against llama.cpp
 
