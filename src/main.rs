@@ -48,6 +48,14 @@ enum Commands {
         /// Top-P (nucleus) sampling
         #[arg(long, default_value_t = 0.9)]
         top_p: f32,
+
+        /// Path to draft model for speculative decoding (smaller GGUF)
+        #[arg(long)]
+        draft_model: Option<PathBuf>,
+
+        /// Number of tokens to draft per speculation step
+        #[arg(long, default_value_t = 5)]
+        draft_ahead: usize,
     },
     /// Show model info from GGUF file
     Info {
@@ -79,6 +87,14 @@ enum Commands {
         /// Port to listen on
         #[arg(long, default_value_t = 11434)]
         port: u16,
+
+        /// Path to draft model for speculative decoding
+        #[arg(long)]
+        draft_model: Option<PathBuf>,
+
+        /// Number of tokens to draft per speculation step
+        #[arg(long, default_value_t = 5)]
+        draft_ahead: usize,
     },
 }
 
@@ -163,6 +179,8 @@ fn main() -> Result<()> {
             temperature,
             top_k,
             top_p,
+            draft_model,
+            draft_ahead,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
@@ -192,26 +210,63 @@ fn main() -> Result<()> {
             println!("\nPrompt: {}", prompt);
             println!("---");
 
-            let start = Instant::now();
-            let result = inference::transformer::generate(
-                &gguf,
-                &loader,
-                &mut cache,
-                &prompt,
-                &config,
-            )?;
+            if let Some(draft_path) = draft_model {
+                // Speculative decoding mode
+                println!("🎯 Speculative decoding with draft model: {}", draft_path.display());
+                let draft_gguf = model::gguf::GgufFile::open(&draft_path)?;
+                let draft_loader = ssd::streamer::SsdStreamer::new(&draft_path, budget / 4)?;
+                let mut draft_cache = model::cache::LayerCache::new(budget / 4);
 
-            let elapsed = start.elapsed();
-            let tokens_generated = result.token_count;
-            let tokens_per_sec = tokens_generated as f64 / elapsed.as_secs_f64();
+                let spec_config = inference::speculative::SpeculativeConfig {
+                    temperature,
+                    top_k,
+                    top_p,
+                    max_tokens,
+                    draft_ahead,
+                };
 
-            println!("{}", result.text);
-            println!("---");
-            println!("Prompt tokens: {} | Generated: {} | Time: {:.2}s | Speed: {:.2} tok/s",
-                result.prompt_tokens, tokens_generated, elapsed.as_secs_f64(), tokens_per_sec);
-            println!("KV cache: {:.2} MB | Layer cache hits: {} | misses: {} | prefetch: {}",
-                result.kv_cache_bytes as f64 / (1024.0 * 1024.0),
-                cache.stats().hits, cache.stats().misses, cache.stats().prefetch_hits);
+                let start = Instant::now();
+                let result = inference::speculative::generate_speculative(
+                    &gguf, &loader, &mut cache,
+                    &draft_gguf, &draft_loader, &mut draft_cache,
+                    &prompt, &spec_config,
+                )?;
+
+                let elapsed = start.elapsed();
+                println!("{}", result.text);
+                println!("---");
+                println!("Prompt tokens: {} | Generated: {} | Time: {:.2}s | Speed: {:.2} tok/s",
+                    result.prompt_tokens, result.token_count, elapsed.as_secs_f64(), result.tokens_per_sec);
+                println!("Draft: {}/{} accepted ({:.1}%) | Target passes: {} (saved {:.0}%)",
+                    result.draft_tokens_accepted, result.draft_tokens_total,
+                    result.acceptance_rate * 100.0, result.target_forward_passes,
+                    if result.token_count > 0 {
+                        (1.0 - result.target_forward_passes as f64 / result.token_count as f64) * 100.0
+                    } else { 0.0 });
+                println!("KV cache: {:.2} MB", result.kv_cache_bytes as f64 / (1024.0 * 1024.0));
+            } else {
+                // Standard decoding
+                let start = Instant::now();
+                let result = inference::transformer::generate(
+                    &gguf,
+                    &loader,
+                    &mut cache,
+                    &prompt,
+                    &config,
+                )?;
+
+                let elapsed = start.elapsed();
+                let tokens_generated = result.token_count;
+                let tokens_per_sec = tokens_generated as f64 / elapsed.as_secs_f64();
+
+                println!("{}", result.text);
+                println!("---");
+                println!("Prompt tokens: {} | Generated: {} | Time: {:.2}s | Speed: {:.2} tok/s",
+                    result.prompt_tokens, tokens_generated, elapsed.as_secs_f64(), tokens_per_sec);
+                println!("KV cache: {:.2} MB | Layer cache hits: {} | misses: {} | prefetch: {}",
+                    result.kv_cache_bytes as f64 / (1024.0 * 1024.0),
+                    cache.stats().hits, cache.stats().misses, cache.stats().prefetch_hits);
+            }
         }
 
         Commands::Bench { model, memory_budget } => {
@@ -219,13 +274,15 @@ fn main() -> Result<()> {
             benchmark::run_benchmark(&model, budget)?;
         }
 
-        Commands::Serve { model, memory_budget, host, port } => {
+        Commands::Serve { model, memory_budget, host, port, draft_model, draft_ahead } => {
             let budget = parse_memory_budget(&memory_budget)?;
             let server = api::server::ApiServer::new(api::server::ServerConfig {
                 host,
                 port,
                 model_path: model,
                 memory_budget: budget,
+                draft_model_path: draft_model,
+                draft_ahead,
             });
             server.run()?;
         }

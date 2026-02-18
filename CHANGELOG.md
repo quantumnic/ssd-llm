@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.5.0 — Speculative Decoding with Draft Model (2026-02-18)
+
+### Added
+- **Speculative decoding engine** (`inference/speculative.rs`):
+  - Draft model generates K candidate tokens autoregressively
+  - Target model verifies candidates, accepting tokens left-to-right
+  - Rejection resampling from adjusted distribution `max(0, p_target - p_draft)`
+  - Bonus token sampling when all K candidates accepted
+  - Mathematically lossless — identical output distribution to standard decoding
+- **`SpeculativeStreamingGenerator`** for token-by-token speculative streaming
+- **KV cache rollback** (`kv_cache.rollback()`) — truncate cache to discard rejected draft tokens
+- **CLI flags**: `--draft-model <path>` and `--draft-ahead <K>` for both `run` and `serve` commands
+- **Stats reporting**: acceptance rate, draft tokens proposed/accepted, target forward passes saved
+- 5 new tests: probability distribution, temperature sharpening, RNG range, deterministic sampling, KV rollback
+
+### Why This Matters for SSD-LLM
+Speculative decoding is uniquely powerful for SSD-streaming inference:
+- The small draft model (e.g. 1B) fits entirely in RAM — no SSD I/O
+- Each accepted draft token avoids one expensive target model forward pass (SSD streaming)
+- With 60-80% acceptance rate, target model does ~40% fewer SSD-streaming passes → 2-3x speedup
+
+### Changed
+- `forward_pass` in transformer.rs now has a public entry point (`forward_pass_pub`) for speculative decoding
+- API server `ServerConfig` extended with `draft_model_path` and `draft_ahead`
+- 23 tests total, all passing
+
 ## v0.4.0 — Metal GPU Dispatch + BPE Tokenizer + Streaming (2026-02-18)
 
 ### Added

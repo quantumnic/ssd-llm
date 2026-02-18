@@ -63,6 +63,13 @@ impl LayerKvCache {
         self.keys.clear();
         self.values.clear();
     }
+
+    /// Rollback to a given sequence length (discard positions >= new_len)
+    /// Used by speculative decoding to reject draft tokens
+    pub fn rollback(&mut self, new_len: usize) {
+        self.keys.truncate(new_len);
+        self.values.truncate(new_len);
+    }
 }
 
 /// Full KV cache across all layers
@@ -108,6 +115,19 @@ impl KvCache {
         for layer in &mut self.layers {
             layer.clear();
         }
+    }
+
+    /// Rollback all layers to a given sequence length
+    /// Used by speculative decoding to discard rejected draft tokens
+    pub fn rollback(&mut self, new_len: usize) {
+        for layer in &mut self.layers {
+            layer.rollback(new_len);
+        }
+    }
+
+    /// Number of layers
+    pub fn n_layers(&self) -> usize {
+        self.layers.len()
     }
 
     /// Check if we've hit the context window limit

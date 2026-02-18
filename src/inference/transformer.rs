@@ -28,6 +28,19 @@ pub struct GenerationResult {
     pub kv_cache_bytes: usize,
 }
 
+/// Run transformer forward pass (public entry point for speculative decoding)
+pub fn forward_pass_pub(
+    gguf: &GgufFile,
+    streamer: &SsdStreamer,
+    layer_cache: &mut LayerCache,
+    kv_cache: &mut KvCache,
+    hidden_state: &mut Vec<f32>,
+    position: usize,
+    prefetcher: &Prefetcher,
+) -> Result<()> {
+    forward_pass(gguf, streamer, layer_cache, kv_cache, hidden_state, position, prefetcher)
+}
+
 /// Run transformer forward pass for a single token through all layers (with KV cache)
 fn forward_pass(
     gguf: &GgufFile,

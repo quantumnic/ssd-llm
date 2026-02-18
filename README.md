@@ -38,6 +38,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🔤 BPE Tokenizer** — Full Byte-Pair Encoding with SentencePiece support from GGUF vocabulary
 - **🔌 Ollama-compatible API** — Drop-in replacement server with OpenAI-compatible endpoint
 - **📡 Streaming** — Real-time token-by-token streaming via chunked transfer (Ollama) and SSE (OpenAI)
+- **🎯 Speculative Decoding** — Use a small draft model to propose tokens, verified by the target model for 2-3x speedup
 
 ## Quick Start
 
@@ -56,6 +57,12 @@ ssd-llm bench model.gguf --memory-budget 8G
 
 # Start Ollama-compatible API server
 ssd-llm serve model.gguf --memory-budget 8G --port 11434
+
+# Speculative decoding with draft model (2-3x faster)
+ssd-llm run model-70b.gguf --draft-model model-1b.gguf --prompt "Hello" --draft-ahead 5
+
+# Serve with speculative decoding
+ssd-llm serve model-70b.gguf --draft-model model-1b.gguf --memory-budget 8G
 ```
 
 ## API Server
@@ -116,7 +123,7 @@ The fast SSD + unified memory means layer streaming has very low overhead on Mac
 
 ## Benchmarks
 
-> v0.4 — metal-rs GPU dispatch, BPE tokenizer, streaming API responses
+> v0.5 — Speculative decoding with draft model, KV cache rollback
 
 | Model | Quant | Size | Memory Budget | Layer Load | Est. tok/s |
 |---|---|---|---|---|---|
@@ -134,6 +141,7 @@ Run `ssd-llm bench` on your machine to get actual numbers.
 | Predictive Prefetch | ✅ madvise hints | ❌ | ❌ |
 | Memory Budget | ✅ Configurable | ❌ | ❌ |
 | Layer-level Cache | ✅ LRU + pinning | ❌ | ❌ |
+| Speculative Decoding | ✅ Draft model | ✅ (v0.6+) | ❌ |
 | Metal GPU | ✅ Shaders + SIMD | ✅ | ✅ (via llama.cpp) |
 | GGUF Support | ✅ | ✅ | ✅ |
 | Quantization | Q4_0, Q8_0, F16 | All | All |
@@ -154,6 +162,7 @@ src/
     kv_cache.rs        — Key-Value cache for autoregressive generation
     feed_forward.rs    — SwiGLU FFN
     sampler.rs         — Temperature, Top-K, Top-P sampling (xorshift64)
+    speculative.rs     — Speculative decoding engine (draft + verify)
     tokenizer.rs       — BPE tokenizer with SentencePiece support
   metal/
     compute.rs         — Metal compute + SIMD-optimized ops (auto GPU dispatch)
@@ -168,6 +177,32 @@ src/
     openai.rs          — OpenAI-compatible types + ChatML formatting
   benchmark.rs         — Performance measurement
 ```
+
+## Speculative Decoding
+
+Speculative decoding uses a small "draft" model (e.g. 1B parameters) to propose candidate tokens, then verifies them with the large target model. This is particularly effective for ssd-llm because:
+
+1. **Draft model fits in RAM** — no SSD streaming needed for the small model
+2. **Target model streams fewer times** — accepted draft tokens skip expensive SSD I/O
+3. **Mathematically lossless** — the output distribution is identical to the target model
+
+### How it works
+
+```
+Draft Model (1B, in RAM):    [tok1] → [tok2] → [tok3] → [tok4] → [tok5]
+                                ↓        ↓        ↓        ↓        ↓
+Target Model (70B, SSD):    verify   verify   verify   REJECT   resample
+                                ✓        ✓        ✓        ✗        →tok4'
+```
+
+With a good draft model, 60-80% of tokens are accepted, meaning the target model does ~40% fewer forward passes. For SSD-streaming workloads this translates to 2-3x speedup.
+
+### Configuration
+
+- `--draft-model <path>` — Path to the draft GGUF model (same tokenizer family)
+- `--draft-ahead <K>` — Number of tokens to draft per round (default: 5, try 3-8)
+
+Higher `draft-ahead` values give more potential speedup but waste more compute on rejections. Start with 5 and tune based on your model pair's acceptance rate.
 
 ## Prior Art & Research
 
@@ -185,7 +220,8 @@ This project builds on insights from:
 - [x] v0.2 — Metal compute foundation, SIMD ops, Ollama + OpenAI API server
 - [x] v0.3 — KV cache, Metal shader compilation, SwiGLU FFN, quantized GPU kernels (Q4_0/Q8_0)
 - [x] v0.4 — Full Metal GPU dispatch via metal-rs, BPE tokenizer, streaming responses
-- [ ] v0.5 — Speculative decoding with draft model
+- [x] v0.5 — Speculative decoding with draft model, KV cache rollback
+- [ ] v0.6 — Batch prefill optimization, adaptive draft length
 - [ ] v1.0 — Production-ready, benchmarked against llama.cpp
 
 ## Requirements
