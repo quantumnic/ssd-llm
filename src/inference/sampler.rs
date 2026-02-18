@@ -1,15 +1,16 @@
 //! Token sampling strategies: Temperature, Top-K, Top-P (nucleus)
 
+use std::cell::Cell;
+
 pub struct Sampler {
     temperature: f32,
     top_k: usize,
     top_p: f32,
-    rng_state: u64,
+    rng_state: Cell<u64>,
 }
 
 impl Sampler {
     pub fn new(temperature: f32, top_k: usize, top_p: f32) -> Self {
-        // Simple seed from system time
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -19,7 +20,7 @@ impl Sampler {
             temperature,
             top_k,
             top_p,
-            rng_state: seed,
+            rng_state: Cell::new(seed ^ 0x517cc1b727220a95),
         }
     }
 
@@ -42,7 +43,7 @@ impl Sampler {
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let k = self.top_k.min(indexed.len());
-        let mut candidates: Vec<(usize, f32)> = indexed[..k].to_vec();
+        let candidates: Vec<(usize, f32)> = indexed[..k].to_vec();
 
         // Softmax over candidates
         let max_val = candidates.iter().map(|(_, v)| *v).fold(f32::NEG_INFINITY, f32::max);
@@ -51,8 +52,10 @@ impl Sampler {
             .map(|(idx, v)| (*idx, (v - max_val).exp()))
             .collect();
         let sum: f32 = probs.iter().map(|(_, p)| p).sum();
-        for (_, p) in probs.iter_mut() {
-            *p /= sum;
+        if sum > 0.0 {
+            for (_, p) in probs.iter_mut() {
+                *p /= sum;
+            }
         }
 
         // Top-P (nucleus) filtering
@@ -69,8 +72,10 @@ impl Sampler {
 
         // Renormalize
         let nuc_sum: f32 = nucleus.iter().map(|(_, p)| p).sum();
-        for (_, p) in nucleus.iter_mut() {
-            *p /= nuc_sum;
+        if nuc_sum > 0.0 {
+            for (_, p) in nucleus.iter_mut() {
+                *p /= nuc_sum;
+            }
         }
 
         // Sample from nucleus
@@ -83,18 +88,18 @@ impl Sampler {
             }
         }
 
-        // Fallback
         nucleus.last().map(|(idx, _)| *idx as u32).unwrap_or(0)
     }
 
-    /// Simple xorshift64 PRNG returning f32 in [0, 1)
+    /// xorshift64 PRNG returning f32 in [0, 1)
     fn random_f32(&self) -> f32 {
-        // Use a simple hash of the state for sampling
-        let mut state = self.rng_state;
+        let mut state = self.rng_state.get();
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        (state as f32) / (u64::MAX as f32)
+        self.rng_state.set(state);
+        // Use upper bits for better distribution
+        ((state >> 11) as f64 / (1u64 << 53) as f64) as f32
     }
 }
 
@@ -104,4 +109,24 @@ fn argmax(v: &[f32]) -> usize {
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_greedy_sampling() {
+        let sampler = Sampler::new(0.0, 40, 0.9);
+        let logits = vec![0.1, 0.5, 0.3, 0.9, 0.2];
+        assert_eq!(sampler.sample(&logits), 3); // argmax
+    }
+
+    #[test]
+    fn test_rng_advances() {
+        let sampler = Sampler::new(1.0, 40, 0.9);
+        let a = sampler.random_f32();
+        let b = sampler.random_f32();
+        assert_ne!(a, b, "RNG should produce different values");
+    }
 }

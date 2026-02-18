@@ -199,9 +199,10 @@ fn main() -> Result<()> {
 
             println!("{}", result.text);
             println!("---");
-            println!("Tokens: {} | Time: {:.2}s | Speed: {:.2} tok/s",
-                tokens_generated, elapsed.as_secs_f64(), tokens_per_sec);
-            println!("Cache hits: {} | Cache misses: {} | Prefetch hits: {}",
+            println!("Prompt tokens: {} | Generated: {} | Time: {:.2}s | Speed: {:.2} tok/s",
+                result.prompt_tokens, tokens_generated, elapsed.as_secs_f64(), tokens_per_sec);
+            println!("KV cache: {:.2} MB | Layer cache hits: {} | misses: {} | prefetch: {}",
+                result.kv_cache_bytes as f64 / (1024.0 * 1024.0),
                 cache.stats().hits, cache.stats().misses, cache.stats().prefetch_hits);
         }
 

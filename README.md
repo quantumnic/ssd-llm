@@ -114,7 +114,7 @@ The fast SSD + unified memory means layer streaming has very low overhead on Mac
 
 ## Benchmarks
 
-> v0.2 — SIMD-optimized CPU, Metal shader foundation
+> v0.3 — KV cache, Metal shaders compiled, SwiGLU FFN, quantized GPU kernels
 
 | Model | Quant | Size | Memory Budget | Layer Load | Est. tok/s |
 |---|---|---|---|---|---|
@@ -148,9 +148,10 @@ src/
     cache.rs           — LRU layer cache with memory budget
   inference/
     transformer.rs     — Layer-by-layer forward pass
-    attention.rs       — Multi-Head Attention (GQA support)
+    attention.rs       — Multi-Head Attention with KV cache (GQA support)
+    kv_cache.rs        — Key-Value cache for autoregressive generation
     feed_forward.rs    — SwiGLU FFN
-    sampler.rs         — Temperature, Top-K, Top-P sampling
+    sampler.rs         — Temperature, Top-K, Top-P sampling (xorshift64)
     tokenizer.rs       — Basic tokenizer from GGUF vocab
   metal/
     compute.rs         — Metal compute + SIMD-optimized ops
@@ -179,8 +180,8 @@ This project builds on insights from:
 
 - [x] v0.1 — GGUF parser, mmap loader, LRU cache, prefetcher, CPU inference
 - [x] v0.2 — Metal compute foundation, SIMD ops, Ollama + OpenAI API server
-- [ ] v0.3 — Full Metal GPU dispatch (matmul via compute shaders), KV-Cache offloading
-- [ ] v0.4 — BPE tokenizer, streaming responses, concurrent request handling
+- [x] v0.3 — KV cache, Metal shader compilation, SwiGLU FFN, quantized GPU kernels (Q4_0/Q8_0)
+- [ ] v0.4 — Full Metal GPU dispatch via metal-rs, BPE tokenizer, streaming responses
 - [ ] v0.5 — Speculative decoding with draft model
 - [ ] v1.0 — Production-ready, benchmarked against llama.cpp
 

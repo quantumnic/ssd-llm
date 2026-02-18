@@ -1,8 +1,10 @@
-//! Feed-Forward Network (SwiGLU variant used in LLaMA)
+//! SwiGLU Feed-Forward Network (as used in LLaMA)
+//!
+//! FFN(x) = down_proj(silu(gate_proj(x)) * up_proj(x))
 
-/// SwiGLU Feed-Forward Network
-/// 
-/// output = down_proj(silu(gate_proj(x)) * up_proj(x))
+use crate::metal::compute::{matvec_f32_simd, silu_f32};
+
+/// Compute SwiGLU feed-forward block
 pub fn feed_forward(
     x: &[f32],
     w_gate: &[f32],
@@ -10,47 +12,42 @@ pub fn feed_forward(
     w_down: &[f32],
     n_embd: usize,
 ) -> Vec<f32> {
-    // Infer hidden dim from weight size
-    let hidden_dim = w_gate.len() / n_embd.max(1);
-    if hidden_dim == 0 {
-        return x.to_vec();
+    // Infer intermediate size from weight dimensions
+    let n_ff = w_gate.len() / n_embd;
+    if n_ff == 0 {
+        return vec![0.0f32; n_embd];
     }
 
-    // gate = x @ W_gate
-    let gate = matmul_vec(x, w_gate, hidden_dim);
+    // gate = silu(x @ W_gate)
+    let mut gate = matvec_f32_simd(w_gate, x, n_ff, n_embd);
+    silu_f32(&mut gate);
+
     // up = x @ W_up
-    let up = matmul_vec(x, w_up, hidden_dim);
+    let up = matvec_f32_simd(w_up, x, n_ff, n_embd);
 
-    // SwiGLU activation: silu(gate) * up
-    let mut hidden = vec![0.0f32; hidden_dim];
-    for i in 0..hidden_dim {
-        let silu = gate[i] * sigmoid(gate[i]); // SiLU = x * sigmoid(x)
-        hidden[i] = silu * up[i];
+    // element-wise: gate * up
+    for (g, u) in gate.iter_mut().zip(up.iter()) {
+        *g *= u;
     }
 
-    // down = hidden @ W_down
-    matmul_vec(&hidden, w_down, n_embd)
+    // down = (gate * up) @ W_down
+    matvec_f32_simd(w_down, &gate, n_embd, n_ff)
 }
 
-#[inline]
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn matmul_vec(x: &[f32], w: &[f32], output_dim: usize) -> Vec<f32> {
-    let input_dim = x.len();
-    let mut output = vec![0.0f32; output_dim];
+    #[test]
+    fn test_feed_forward_shapes() {
+        let n_embd = 4;
+        let n_ff = 8;
+        let x = vec![1.0f32; n_embd];
+        let w_gate = vec![0.1f32; n_ff * n_embd];
+        let w_up = vec![0.1f32; n_ff * n_embd];
+        let w_down = vec![0.1f32; n_embd * n_ff];
 
-    for i in 0..output_dim.min(w.len() / input_dim.max(1)) {
-        let mut sum = 0.0f32;
-        let row_start = i * input_dim;
-        for j in 0..input_dim {
-            if row_start + j < w.len() {
-                sum += w[row_start + j] * x[j];
-            }
-        }
-        output[i] = sum;
+        let out = feed_forward(&x, &w_gate, &w_up, &w_down, n_embd);
+        assert_eq!(out.len(), n_embd);
     }
-
-    output
 }
