@@ -111,8 +111,8 @@ pub fn flash_attention_cached(
                 // New maximum: rescale existing accumulator
                 let correction = (running_max - score).exp();
                 running_sum *= correction;
-                for d in 0..head_dim {
-                    output_acc[d] *= correction;
+                for acc in output_acc.iter_mut().take(head_dim) {
+                    *acc *= correction;
                 }
                 running_max = score;
             }
@@ -199,8 +199,8 @@ pub fn flash_attention_windowed(
             if score > running_max {
                 let correction = (running_max - score).exp();
                 running_sum *= correction;
-                for d in 0..head_dim {
-                    output_acc[d] *= correction;
+                for acc in output_acc.iter_mut().take(head_dim) {
+                    *acc *= correction;
                 }
                 running_max = score;
             }

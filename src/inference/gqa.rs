@@ -71,9 +71,8 @@ pub fn gqa_attention(
 
             // Compute attention scores using pre-fetched keys
             let mut scores = Vec::with_capacity(seq_len);
-            for pos in 0..seq_len {
-                let k_head = cached_keys[pos];
-                let dot = dot_product_simd(q_head, k_head, head_dim);
+            for key in cached_keys.iter().take(seq_len) {
+                let dot = dot_product_simd(q_head, key, head_dim);
                 scores.push(dot * scale);
             }
 

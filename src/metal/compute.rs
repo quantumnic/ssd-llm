@@ -190,7 +190,7 @@ pub fn matvec_f32_simd(w: &[f32], x: &[f32], out_dim: usize, in_dim: usize) -> V
     let chunks = in_dim / 4;
     let remainder = in_dim % 4;
 
-    for i in 0..out_dim {
+    for (i, y_val) in y.iter_mut().enumerate().take(out_dim) {
         let row_start = i * in_dim;
         if row_start + in_dim > w.len() {
             continue;
@@ -215,7 +215,7 @@ pub fn matvec_f32_simd(w: &[f32], x: &[f32], out_dim: usize, in_dim: usize) -> V
             sum0 += row[base + j] * x[base + j];
         }
 
-        y[i] = sum0 + sum1 + sum2 + sum3;
+        *y_val = sum0 + sum1 + sum2 + sum3;
     }
 
     y

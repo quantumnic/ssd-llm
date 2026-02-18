@@ -67,9 +67,8 @@ pub fn batch_prefill(
         let cached = layer_cache.get(layer_idx).unwrap();
 
         // Process ALL tokens through this layer before moving to the next
-        for t in 0..n_tokens {
+        for (t, hidden_state) in hidden_states.iter_mut().enumerate().take(n_tokens) {
             let position = start_position + t;
-            let hidden_state = &mut hidden_states[t];
 
             // 1. RMS Norm (pre-attention)
             let mut attn_input = hidden_state.clone();
@@ -97,8 +96,8 @@ pub fn batch_prefill(
                     position,
                     kv_layer,
                 );
-                for i in 0..hidden_state.len() {
-                    hidden_state[i] += attn_output.get(i).copied().unwrap_or(0.0);
+                for (i, hs) in hidden_state.iter_mut().enumerate() {
+                    *hs += attn_output.get(i).copied().unwrap_or(0.0);
                 }
             }
 
@@ -130,6 +129,7 @@ pub fn batch_prefill(
 }
 
 /// Run transformer forward pass (public entry point for speculative decoding)
+#[allow(clippy::ptr_arg)]
 pub fn forward_pass_pub(
     gguf: &GgufFile,
     streamer: &SsdStreamer,
@@ -151,6 +151,7 @@ pub fn forward_pass_pub(
 }
 
 /// Run transformer forward pass for a single token through all layers (with KV cache)
+#[allow(clippy::ptr_arg)]
 fn forward_pass(
     gguf: &GgufFile,
     streamer: &SsdStreamer,
@@ -205,8 +206,8 @@ fn forward_pass(
                 kv_layer,
             );
             // Residual connection
-            for i in 0..hidden_state.len() {
-                hidden_state[i] += attn_output.get(i).copied().unwrap_or(0.0);
+            for (i, hs) in hidden_state.iter_mut().enumerate() {
+                *hs += attn_output.get(i).copied().unwrap_or(0.0);
             }
         }
 
@@ -247,6 +248,7 @@ fn find_tensor_in_layer<'a>(
 }
 
 /// RMS Normalization in-place
+#[allow(clippy::ptr_arg)]
 fn rms_norm(x: &mut Vec<f32>, weight: &[f32]) {
     crate::metal::compute::rmsnorm_f32_fast(x, weight, 1e-5);
 }

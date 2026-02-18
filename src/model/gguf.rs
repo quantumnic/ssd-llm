@@ -233,7 +233,7 @@ impl GgufFile {
 
         // Read version
         let version = reader.read_u32::<LittleEndian>()?;
-        if version < 2 || version > 3 {
+        if !(2..=3).contains(&version) {
             bail!("Unsupported GGUF version: {} (supported: 2-3)", version);
         }
 
@@ -271,7 +271,7 @@ impl GgufFile {
             let n_elements: u64 = dimensions.iter().product();
             let block_size = dtype.block_size() as u64;
             let type_size = dtype.type_size() as u64;
-            let n_blocks = (n_elements + block_size - 1) / block_size;
+            let n_blocks = n_elements.div_ceil(block_size);
             let size_bytes = n_blocks * type_size;
 
             tensors.push(TensorInfo {
@@ -289,7 +289,7 @@ impl GgufFile {
             .get("general.alignment")
             .and_then(|v| v.as_u32())
             .unwrap_or(32) as u64;
-        let data_offset = (current_pos + alignment - 1) / alignment * alignment;
+        let data_offset = current_pos.div_ceil(alignment) * alignment;
 
         Ok(GgufFile {
             header,

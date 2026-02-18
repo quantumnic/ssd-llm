@@ -1,5 +1,55 @@
 # Changelog
 
+## v1.0.0 — Production-Ready Release (2026-02-19)
+
+### Added
+- **Model downloader** (`pull/mod.rs`):
+  - `ssd-llm pull user/repo:file.gguf` — download GGUF models from Hugging Face Hub
+  - Supports short-form (`user/repo:file.gguf`), repo-only (`user/repo`), and full URLs
+  - Resumable downloads via curl with `.part` file tracking
+  - GGUF magic validation on downloaded files
+  - `ssd-llm models` — list locally downloaded models with sizes
+  - Configurable model directory via `$SSD_LLM_MODEL_DIR` env var
+  - 7 new tests for URL parsing, model spec parsing, and directory listing
+- **Configuration file** (`config.rs`):
+  - `ssd-llm config --init` — generate default `ssd-llm.toml`
+  - `ssd-llm config` — show current configuration
+  - TOML parser (no external dependency) with `[model]`, `[server]`, `[inference]`, `[paths]` sections
+  - Auto-discovery: `./ssd-llm.toml` → `~/.config/ssd-llm/ssd-llm.toml`
+  - `$SSD_LLM_CONFIG` env var for custom config path
+  - 6 new tests for config parsing, defaults, and generation
+- **Graceful shutdown** — SIGINT/SIGTERM handling for clean server stop
+  - Non-blocking accept loop with shutdown flag
+  - "Press Ctrl+C to stop" message on server start
+- **CORS preflight** — `OPTIONS` handler with proper CORS headers for browser-based clients
+- **Criterion micro-benchmarks** (`benches/inference_bench.rs`):
+  - `cargo bench` — reproducible benchmarks with HTML reports
+  - Benchmarks: softmax, RMSNorm, matrix-vector multiply, RoPE, SiLU, dot product
+  - Multiple input sizes per benchmark for scaling analysis
+  - 4-wide SIMD vs naive dot product comparison
+- 13 new tests (87 total, all passing)
+
+### Changed
+- **Removed blanket `#![allow(dead_code)]` clippy suppressions** — all 25 individual clippy warnings fixed:
+  - Replaced `for i in 0..len { arr[i] }` patterns with iterators
+  - Removed unnecessary `u64` casts in Metal GPU pipeline
+  - Used `div_ceil()` instead of manual reimplementation
+  - Used `RangeInclusive::contains()` for version checks
+  - Replaced redundant closures with function references
+  - Only `#![allow(dead_code)]` (for unreached public API items) and `#![allow(clippy::too_many_arguments)]` remain
+- API server version bumped to 1.0.0
+- Cargo.toml version bumped to 1.0.0
+- README: updated features, architecture, roadmap (v1.0 ✅)
+
+### Why Model Download Matters
+Getting models is the first barrier for new users. `ssd-llm pull` makes it one command, with resume support for large downloads (70B models at ~40GB). No need to manually navigate HuggingFace and figure out which file to download.
+
+### Why Config File Matters
+Production deployments need reproducible settings. A TOML config file means you can version-control your inference parameters, share configs between machines, and avoid long CLI argument lists.
+
+### Why Graceful Shutdown Matters
+In production, SIGTERM from container orchestrators (Kubernetes, Docker) needs to be handled cleanly — finish in-flight requests, close connections, and exit with code 0. This is table stakes for v1.0.
+
 ## v0.9.0 — Structured Benchmark Suite + Flash Attention + Health/Metrics API (2026-02-18)
 
 ### Added

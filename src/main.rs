@@ -1,28 +1,17 @@
+// v1.0 — Production-ready ssd-llm
+// Many public API items are defined but not yet wired into all code paths
+// (e.g., GPU dispatch, advanced attention strategies, streaming generators).
+// These will be connected as features mature.
 #![allow(dead_code)]
-#![allow(
-    clippy::too_many_arguments,
-    clippy::needless_range_loop,
-    clippy::unnecessary_cast,
-    clippy::manual_div_ceil,
-    clippy::format_in_format_args,
-    clippy::manual_range_contains,
-    clippy::ptr_arg,
-    clippy::useless_format,
-    clippy::collapsible_if,
-    clippy::redundant_field_names,
-    clippy::single_match,
-    clippy::search_is_some,
-    clippy::trim_split_whitespace,
-    clippy::type_complexity,
-    clippy::vec_box,
-    clippy::module_inception
-)]
+#![allow(clippy::too_many_arguments)]
 
 mod api;
 mod benchmark;
+mod config;
 mod inference;
 mod metal;
 mod model;
+mod pull;
 mod ssd;
 
 use anyhow::Result;
@@ -183,6 +172,31 @@ enum Commands {
         /// Use flash attention (memory-efficient fused attention kernel)
         #[arg(long, default_value_t = false)]
         flash_attention: bool,
+    },
+    /// Download a GGUF model from Hugging Face
+    Pull {
+        /// Model specifier: user/repo:file.gguf, user/repo, or HF URL
+        model: String,
+
+        /// Output directory for downloaded models
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Force re-download even if file exists
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// List locally downloaded models
+    Models {
+        /// Directory to scan (defaults to models/ or $SSD_LLM_MODEL_DIR)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Generate or show configuration
+    Config {
+        /// Generate a default config file
+        #[arg(long, default_value_t = false)]
+        init: bool,
     },
 }
 
@@ -523,6 +537,87 @@ fn main() -> Result<()> {
                 tensor_parallel: tp_shards,
             });
             server.run()?;
+        }
+
+        Commands::Pull {
+            model: spec,
+            output,
+            force,
+        } => {
+            let (repo, filename) = pull::parse_model_spec(&spec)?;
+            let output_dir = output.unwrap_or_else(pull::default_model_dir);
+
+            let filename = match filename {
+                Some(f) => f,
+                None => {
+                    println!("🔍 Listing GGUF files in {}...", repo);
+                    let files = pull::list_gguf_files(&repo)?;
+                    if files.is_empty() {
+                        anyhow::bail!("No GGUF files found in {}", repo);
+                    }
+                    println!("Available GGUF files:");
+                    for (i, f) in files.iter().enumerate() {
+                        println!("  [{}] {}", i + 1, f);
+                    }
+                    if files.len() == 1 {
+                        files[0].clone()
+                    } else {
+                        anyhow::bail!(
+                            "Multiple GGUF files found. Specify one: {}:<filename>",
+                            repo
+                        );
+                    }
+                }
+            };
+
+            pull::download_model(&repo, &filename, &output_dir, force)?;
+        }
+
+        Commands::Models { dir } => {
+            let dir = dir.unwrap_or_else(pull::default_model_dir);
+            let models = pull::list_local_models(&dir)?;
+            if models.is_empty() {
+                println!("No models found in {}", dir.display());
+                println!("Download one with: ssd-llm pull <user/repo:file.gguf>");
+            } else {
+                println!("📦 Local models ({}):", dir.display());
+                for (name, size) in &models {
+                    println!(
+                        "  {} ({:.2} GB)",
+                        name,
+                        *size as f64 / (1024.0 * 1024.0 * 1024.0)
+                    );
+                }
+                println!("  Total: {} model(s)", models.len());
+            }
+        }
+
+        Commands::Config { init } => {
+            if init {
+                let path = std::path::PathBuf::from("ssd-llm.toml");
+                if path.exists() {
+                    println!("⚠ ssd-llm.toml already exists. Remove it first to regenerate.");
+                } else {
+                    std::fs::write(&path, config::Config::default_toml())?;
+                    println!("✓ Generated ssd-llm.toml with default settings");
+                }
+            } else {
+                match config::Config::load() {
+                    Ok(cfg) => {
+                        println!("=== ssd-llm Configuration ===");
+                        println!("Model path: {:?}", cfg.model.path);
+                        println!("Memory budget: {}", cfg.model.memory_budget);
+                        println!("Server: {}:{}", cfg.server.host, cfg.server.port);
+                        println!("Flash attention: {}", cfg.inference.flash_attention);
+                        println!("Sliding window: {}", cfg.inference.sliding_window);
+                        println!("Model directory: {}", cfg.paths.model_dir.display());
+                    }
+                    Err(e) => {
+                        println!("No config loaded (using defaults): {}", e);
+                        println!("Run `ssd-llm config --init` to create one.");
+                    }
+                }
+            }
         }
     }
 

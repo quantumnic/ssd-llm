@@ -50,12 +50,23 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **⚡ Flash Attention** — Memory-efficient fused attention kernel using online softmax (O(1) extra memory per head)
 - **📊 Structured Benchmark Suite** — JSON-exportable benchmarks with cold/warm/streaming scenarios for CI/CD
 - **🏥 Health & Metrics API** — `/health` and `/metrics` endpoints with Prometheus-compatible output for production monitoring
+- **📥 Model Downloader** — `ssd-llm pull` to download GGUF models from Hugging Face with resume support
+- **⚙️ Configuration File** — TOML config file support for persistent settings
+- **🛑 Graceful Shutdown** — Signal handling (SIGINT/SIGTERM) for clean server shutdown
+- **🔧 CORS Support** — Full CORS preflight handling for browser-based clients
+- **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
 
 ```bash
 # Build
 cargo build --release
+
+# Download a model from Hugging Face
+ssd-llm pull TheBloke/Llama-2-7B-GGUF:llama-2-7b.Q4_0.gguf
+
+# List local models
+ssd-llm models
 
 # Show model info
 ssd-llm info model.gguf
@@ -95,6 +106,12 @@ ssd-llm run model.gguf --prompt "Hello" --mmap-kv --max-tokens 32768
 
 # GQA is auto-detected — just run and see the optimization message
 ssd-llm run llama-70b.gguf --prompt "Hello" --memory-budget 16G
+
+# Generate default config file
+ssd-llm config --init
+
+# Run micro-benchmarks
+cargo bench
 ```
 
 ## API Server
@@ -114,6 +131,8 @@ ssd-llm serve model.gguf --memory-budget 8G
 | `/api/tags` | GET | List loaded models |
 | `/api/version` | GET | Server version |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat |
+| `/health` | GET | Readiness probe (JSON) |
+| `/metrics` | GET | Prometheus-compatible metrics |
 
 ### Usage with curl
 
@@ -211,9 +230,15 @@ src/
     prefetch.rs        — Predictive prefetcher
     mmap_pool.rs       — mmap pool with madvise management
   api/
-    server.rs          — Ollama-compatible HTTP API server
+    server.rs          — Ollama-compatible HTTP API server (graceful shutdown, CORS)
     openai.rs          — OpenAI-compatible types + ChatML formatting
+    metrics.rs         — Health & Prometheus metrics
+  pull/
+    mod.rs             — HuggingFace model downloader with resume support
+  config.rs            — TOML configuration file support
   benchmark.rs         — Performance measurement
+benches/
+  inference_bench.rs   — Criterion micro-benchmarks (softmax, matvec, RoPE, SiLU)
 ```
 
 ## Speculative Decoding
@@ -263,7 +288,7 @@ This project builds on insights from:
 - [x] v0.7 — Continuous batching, prompt caching, tensor parallelism
 - [x] v0.8 — Sliding window attention, GQA optimization, memory-mapped KV cache
 - [x] v0.9 — Structured benchmark suite, flash attention, health/metrics API
-- [ ] v1.0 — Production-ready, benchmarked against llama.cpp
+- [x] v1.0 — Production-ready: model downloader, config files, graceful shutdown, criterion benchmarks, CORS, clippy-clean
 
 ## Requirements
 

@@ -74,9 +74,9 @@ pub fn multi_head_attention_cached(
         let out_offset = h * head_dim;
         for d in 0..head_dim {
             let mut weighted = 0.0f32;
-            for pos in 0..seq_len {
+            for (pos, &score) in scores.iter().enumerate().take(seq_len) {
                 let v_head = kv_cache.value_at(pos, kv_h);
-                weighted += scores[pos] * v_head[d];
+                weighted += score * v_head[d];
             }
             if out_offset + d < attn_output.len() {
                 attn_output[out_offset + d] = weighted;

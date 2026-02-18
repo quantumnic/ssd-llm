@@ -131,8 +131,8 @@ impl MetalGpu {
             (self
                 .pipelines
                 .matvec_f32
-                .max_total_threads_per_threadgroup() as u64)
-                .min(out_dim as u64),
+                .max_total_threads_per_threadgroup())
+            .min(out_dim as u64),
             1,
             1,
         );
@@ -189,8 +189,8 @@ impl MetalGpu {
             (self
                 .pipelines
                 .rmsnorm_normalize
-                .max_total_threads_per_threadgroup() as u64)
-                .min(n as u64),
+                .max_total_threads_per_threadgroup())
+            .min(n as u64),
             1,
             1,
         );
@@ -252,8 +252,8 @@ impl MetalGpu {
             (self
                 .pipelines
                 .softmax_normalize
-                .max_total_threads_per_threadgroup() as u64)
-                .min(n as u64),
+                .max_total_threads_per_threadgroup())
+            .min(n as u64),
             1,
             1,
         );
@@ -294,7 +294,7 @@ impl MetalGpu {
         encoder.set_buffer(4, Some(&theta_buf), 0);
         let threads = MTLSize::new(total_pairs, 1, 1);
         let tg = MTLSize::new(
-            (self.pipelines.rope_f32.max_total_threads_per_threadgroup() as u64).min(total_pairs),
+            (self.pipelines.rope_f32.max_total_threads_per_threadgroup()).min(total_pairs),
             1,
             1,
         );
@@ -321,7 +321,7 @@ impl MetalGpu {
         encoder.set_buffer(1, Some(&n_buf), 0);
         let threads = MTLSize::new(n as u64, 1, 1);
         let tg = MTLSize::new(
-            (self.pipelines.silu_f32.max_total_threads_per_threadgroup() as u64).min(n as u64),
+            (self.pipelines.silu_f32.max_total_threads_per_threadgroup()).min(n as u64),
             1,
             1,
         );

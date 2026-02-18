@@ -16,9 +16,10 @@ use anyhow::Result;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Server configuration
 pub struct ServerConfig {
@@ -91,19 +92,62 @@ impl ApiServer {
             model_path: self.config.model_path.clone(),
         }));
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
+        // Graceful shutdown via SIGINT/SIGTERM
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+
+        // Set up signal handler
+        ctrlc_register(move || {
+            warn!("Shutdown signal received, stopping server...");
+            shutdown_clone.store(true, Ordering::SeqCst);
+        });
+
+        // Set non-blocking so we can check shutdown flag
+        listener.set_nonblocking(true)?;
+
+        info!("Server ready. Press Ctrl+C to stop.");
+
+        while !shutdown.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _addr)) => {
                     let ctx = Arc::clone(&ctx);
                     if let Err(e) = handle_connection(stream, &ctx) {
                         error!("Request error: {}", e);
                     }
                 }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
                 Err(e) => error!("Accept error: {}", e),
             }
         }
 
+        info!("Server stopped gracefully.");
         Ok(())
+    }
+}
+
+/// Register a ctrl-c handler (simplified, no external crate)
+fn ctrlc_register<F: FnOnce() + Send + 'static>(handler: F) {
+    let handler = std::sync::Mutex::new(Some(handler));
+    unsafe {
+        libc::signal(libc::SIGINT, (signal_handler as *const ()) as usize);
+        libc::signal(libc::SIGTERM, (signal_handler as *const ()) as usize);
+    }
+    // Store handler in a static
+    *SHUTDOWN_HANDLER.lock().unwrap() = Some(Box::new(move || {
+        if let Some(f) = handler.lock().unwrap().take() {
+            f();
+        }
+    }));
+}
+
+static SHUTDOWN_HANDLER: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
+
+extern "C" fn signal_handler(_sig: libc::c_int) {
+    if let Some(handler) = SHUTDOWN_HANDLER.lock().unwrap().take() {
+        handler();
     }
 }
 
@@ -112,7 +156,7 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
 
-    let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
         return send_response(&mut stream, 400, "Bad Request");
     }
@@ -150,10 +194,11 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("POST", "/v1/chat/completions") => handle_openai_chat(&mut stream, ctx, &body_str),
         ("GET", "/health") => handle_health(&mut stream, ctx),
         ("GET", "/metrics") => handle_metrics(&mut stream, ctx),
+        ("OPTIONS", _) => handle_cors_preflight(&mut stream),
         ("GET", "/") => send_json_response(
             &mut stream,
             200,
-            r#"{"status":"ssd-llm is running","version":"0.9.0"}"#,
+            r#"{"status":"ssd-llm is running","version":"1.0.0"}"#,
         ),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
@@ -162,17 +207,29 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
 fn handle_tags(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
     let ctx = ctx.lock().unwrap();
     let resp = format!(
-        r#"{{"models":[{{"name":"{}","size":{},"digest":"local","details":{{"family":"{}","parameter_size":"{}","quantization_level":"local"}}}}]}}"#,
+        r#"{{"models":[{{"name":"{}","size":{},"digest":"local","details":{{"family":"{}","parameter_size":"{}B","quantization_level":"local"}}}}]}}"#,
         ctx.model_name,
         ctx.gguf.file_size,
         ctx.gguf.architecture(),
-        format!("{}B", ctx.gguf.n_layers()),
+        ctx.gguf.n_layers(),
     );
     send_json_response(stream, 200, &resp)
 }
 
+fn handle_cors_preflight(stream: &mut TcpStream) -> Result<()> {
+    let resp = "HTTP/1.1 204 No Content\r\n\
+        Access-Control-Allow-Origin: *\r\n\
+        Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+        Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+        Access-Control-Max-Age: 86400\r\n\
+        Content-Length: 0\r\n\
+        Connection: close\r\n\r\n";
+    stream.write_all(resp.as_bytes())?;
+    Ok(())
+}
+
 fn handle_version(stream: &mut TcpStream) -> Result<()> {
-    send_json_response(stream, 200, r#"{"version":"0.9.0-ssd-llm"}"#)
+    send_json_response(stream, 200, r#"{"version":"1.0.0-ssd-llm"}"#)
 }
 
 fn handle_health(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
