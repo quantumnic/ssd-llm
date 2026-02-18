@@ -39,6 +39,8 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🔌 Ollama-compatible API** — Drop-in replacement server with OpenAI-compatible endpoint
 - **📡 Streaming** — Real-time token-by-token streaming via chunked transfer (Ollama) and SSE (OpenAI)
 - **🎯 Speculative Decoding** — Use a small draft model to propose tokens, verified by the target model for 2-3x speedup
+- **📦 Batch Prefill** — Layer-major prompt processing: each layer loaded once for all prompt tokens, minimizing SSD reads
+- **🎛️ Adaptive Draft Length** — Dynamically adjusts speculation depth K based on rolling acceptance rate
 
 ## Quick Start
 
@@ -60,6 +62,9 @@ ssd-llm serve model.gguf --memory-budget 8G --port 11434
 
 # Speculative decoding with draft model (2-3x faster)
 ssd-llm run model-70b.gguf --draft-model model-1b.gguf --prompt "Hello" --draft-ahead 5
+
+# Adaptive draft length (auto-tunes K based on acceptance rate)
+ssd-llm run model-70b.gguf --draft-model model-1b.gguf --prompt "Hello" --adaptive-draft
 
 # Serve with speculative decoding
 ssd-llm serve model-70b.gguf --draft-model model-1b.gguf --memory-budget 8G
@@ -221,7 +226,8 @@ This project builds on insights from:
 - [x] v0.3 — KV cache, Metal shader compilation, SwiGLU FFN, quantized GPU kernels (Q4_0/Q8_0)
 - [x] v0.4 — Full Metal GPU dispatch via metal-rs, BPE tokenizer, streaming responses
 - [x] v0.5 — Speculative decoding with draft model, KV cache rollback
-- [ ] v0.6 — Batch prefill optimization, adaptive draft length
+- [x] v0.6 — Batch prefill optimization, adaptive draft length
+- [ ] v0.7 — Continuous batching, prompt caching, tensor parallelism
 - [ ] v1.0 — Production-ready, benchmarked against llama.cpp
 
 ## Requirements

@@ -12,6 +12,69 @@
 //! the number of expensive SSD-streaming forward passes.
 
 use crate::inference::kv_cache::KvCache;
+
+/// Adaptive draft length controller
+/// Adjusts K based on rolling acceptance rate to optimize throughput.
+/// High acceptance → increase K (more tokens per speculation round)
+/// Low acceptance → decrease K (avoid wasted draft compute)
+pub struct AdaptiveDrafter {
+    /// Current draft length
+    current_k: usize,
+    /// Minimum draft length
+    min_k: usize,
+    /// Maximum draft length
+    max_k: usize,
+    /// Exponential moving average of acceptance rate
+    ema_acceptance: f64,
+    /// EMA smoothing factor (higher = more responsive)
+    alpha: f64,
+    /// Number of rounds observed
+    rounds: usize,
+}
+
+impl AdaptiveDrafter {
+    pub fn new(initial_k: usize, min_k: usize, max_k: usize) -> Self {
+        Self {
+            current_k: initial_k,
+            min_k: min_k.max(1),
+            max_k,
+            ema_acceptance: 0.5, // start neutral
+            alpha: 0.3,
+            rounds: 0,
+        }
+    }
+
+    /// Report the result of a speculation round
+    pub fn update(&mut self, proposed: usize, accepted: usize) {
+        if proposed == 0 {
+            return;
+        }
+        let rate = accepted as f64 / proposed as f64;
+        self.ema_acceptance = self.alpha * rate + (1.0 - self.alpha) * self.ema_acceptance;
+        self.rounds += 1;
+
+        // Adjust K based on acceptance rate
+        // High acceptance (>70%) → try more tokens
+        // Low acceptance (<40%) → draft fewer tokens
+        if self.rounds >= 2 {
+            if self.ema_acceptance > 0.7 && self.current_k < self.max_k {
+                self.current_k += 1;
+            } else if self.ema_acceptance < 0.4 && self.current_k > self.min_k {
+                self.current_k -= 1;
+            }
+        }
+    }
+
+    /// Get current draft length
+    pub fn k(&self) -> usize {
+        self.current_k
+    }
+
+    /// Get current EMA acceptance rate
+    pub fn acceptance_rate(&self) -> f64 {
+        self.ema_acceptance
+    }
+}
 use crate::inference::sampler::Sampler;
 use crate::inference::tokenizer::SimpleTokenizer;
 use crate::model::cache::LayerCache;
@@ -28,8 +91,10 @@ pub struct SpeculativeConfig {
     pub top_k: usize,
     pub top_p: f32,
     pub max_tokens: usize,
-    /// Number of tokens to draft per speculation step (K)
+    /// Number of tokens to draft per speculation step (K), or initial K if adaptive
     pub draft_ahead: usize,
+    /// Enable adaptive draft length (adjusts K based on acceptance rate)
+    pub adaptive: bool,
 }
 
 /// Result of speculative decoding
@@ -218,21 +283,30 @@ pub fn generate_speculative(
 
     let start = Instant::now();
 
-    // Prefill both models with prompt
-    for (pos, &token_id) in tokens.iter().enumerate() {
-        forward_single(
-            target_gguf, target_streamer, target_cache, &mut target_kv,
-            token_id, pos, &target_prefetcher,
-        )?;
-        forward_single(
-            draft_gguf, draft_streamer, draft_cache, &mut draft_kv,
-            token_id, pos, &draft_prefetcher,
-        )?;
+    // Batch prefill both models with prompt (load embeddings once per model)
+    {
+        let t_n_embd_sz = target_gguf.n_embd() as usize;
+        let d_n_embd_sz = draft_gguf.n_embd() as usize;
+        let t_emb = target_streamer.load_named_tensor_f32(target_gguf, "token_embd.weight").ok();
+        let d_emb = draft_streamer.load_named_tensor_f32(draft_gguf, "token_embd.weight").ok();
+
+        for (pos, &token_id) in tokens.iter().enumerate() {
+            // Target prefill
+            forward_single(
+                target_gguf, target_streamer, target_cache, &mut target_kv,
+                token_id, pos, &target_prefetcher,
+            )?;
+            // Draft prefill
+            forward_single(
+                draft_gguf, draft_streamer, draft_cache, &mut draft_kv,
+                token_id, pos, &draft_prefetcher,
+            )?;
+        }
     }
 
     let prefill_time = start.elapsed();
     info!(
-        "Prefill: {} tokens in {:.2}ms",
+        "Prefill (batch): {} tokens in {:.2}ms",
         prompt_len, prefill_time.as_millis()
     );
 
@@ -243,6 +317,13 @@ pub fn generate_speculative(
     let mut draft_total = 0usize;
     let mut draft_accepted = 0usize;
     let mut target_passes = 0usize;
+
+    // Adaptive draft length controller
+    let mut drafter = AdaptiveDrafter::new(
+        config.draft_ahead,
+        1,
+        config.draft_ahead * 3, // allow up to 3x initial K
+    );
 
     // We need to get the initial target logits for the first position after prompt
     // Run one target forward pass to get logits at end of prompt
@@ -255,12 +336,13 @@ pub fn generate_speculative(
         }
 
         // === DRAFT PHASE ===
-        // Draft model generates K candidate tokens
+        // Draft model generates K candidate tokens (K is adaptive or fixed)
+        let current_k = if config.adaptive { drafter.k() } else { config.draft_ahead };
         let draft_start_pos = pos;
         let draft_kv_start = draft_kv.seq_len();
         let target_kv_start = target_kv.seq_len();
-        let mut draft_tokens: Vec<u32> = Vec::with_capacity(config.draft_ahead);
-        let mut draft_logits_list: Vec<Vec<f32>> = Vec::with_capacity(config.draft_ahead);
+        let mut draft_tokens: Vec<u32> = Vec::with_capacity(current_k);
+        let mut draft_logits_list: Vec<Vec<f32>> = Vec::with_capacity(current_k);
 
         // Get the last accepted token to start drafting from
         let mut current_token = if generated_tokens.is_empty() {
@@ -269,7 +351,7 @@ pub fn generate_speculative(
             *generated_tokens.last().unwrap()
         };
 
-        for k in 0..config.draft_ahead {
+        for k in 0..current_k {
             if draft_kv.is_full() { break; }
 
             let (logits, _) = forward_single(
@@ -406,6 +488,12 @@ pub fn generate_speculative(
 
         draft_accepted += n_accepted.min(draft_tokens.len());
 
+        // Update adaptive drafter with this round's results
+        if config.adaptive {
+            drafter.update(draft_tokens.len(), n_accepted.min(draft_tokens.len()));
+            debug!("Adaptive K: {} (acceptance EMA: {:.2})", drafter.k(), drafter.acceptance_rate());
+        }
+
         // Rollback KV caches to only include accepted positions
         let accepted_positions = pos + generated_tokens.len() - (generated_tokens.len().saturating_sub(
             generated_tokens.len() - (generated_tokens.len() - n_accepted.min(generated_tokens.len()))
@@ -464,6 +552,10 @@ pub fn generate_speculative(
         draft_accepted, draft_total, acceptance_rate * 100.0,
         target_passes, token_count
     );
+    if config.adaptive {
+        info!("Adaptive draft length: final K={}, EMA acceptance={:.2}",
+            drafter.k(), drafter.acceptance_rate());
+    }
 
     let text = tokenizer.decode(&generated_tokens);
 
@@ -500,6 +592,8 @@ pub struct SpeculativeStreamingGenerator<'a> {
     temperature: f32,
     vocab_size: usize,
     draft_ahead: usize,
+    adaptive: bool,
+    drafter: AdaptiveDrafter,
     position: usize,
     prompt_len: usize,
     remaining: usize,
@@ -558,12 +652,13 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
 
         let draft_kv_start = self.draft_kv.seq_len();
 
-        // Draft K tokens
-        let mut draft_tokens = Vec::with_capacity(self.draft_ahead);
-        let mut draft_logits_list = Vec::with_capacity(self.draft_ahead);
+        // Draft K tokens (adaptive or fixed)
+        let current_k = if self.adaptive { self.drafter.k() } else { self.draft_ahead };
+        let mut draft_tokens = Vec::with_capacity(current_k);
+        let mut draft_logits_list = Vec::with_capacity(current_k);
         let mut current_token = self.last_token;
 
-        for k in 0..self.draft_ahead {
+        for k in 0..current_k {
             if self.draft_kv.is_full() { break; }
             let (logits, _) = forward_single(
                 self.draft_gguf, self.draft_streamer, self.draft_cache, &mut self.draft_kv,
@@ -661,6 +756,11 @@ impl<'a> SpeculativeStreamingGenerator<'a> {
         }
 
         self.draft_accepted += n_accepted.min(draft_tokens.len());
+
+        // Update adaptive drafter
+        if self.adaptive {
+            self.drafter.update(draft_tokens.len(), n_accepted.min(draft_tokens.len()));
+        }
 
         // Update state
         for &tok in &self.pending_tokens {
@@ -762,6 +862,8 @@ pub fn generate_speculative_streaming<'a>(
         temperature: config.temperature,
         vocab_size,
         draft_ahead: config.draft_ahead,
+        adaptive: config.adaptive,
+        drafter: AdaptiveDrafter::new(config.draft_ahead, 1, config.draft_ahead * 3),
         position: prompt_len,
         prompt_len,
         remaining: config.max_tokens,
@@ -816,6 +918,43 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(sample_from_probs(&probs, &mut rng), 2);
         }
+    }
+
+    #[test]
+    fn test_adaptive_drafter_increases_k() {
+        let mut drafter = AdaptiveDrafter::new(5, 1, 15);
+        assert_eq!(drafter.k(), 5);
+        // Simulate high acceptance rate
+        for _ in 0..5 {
+            drafter.update(5, 5); // 100% acceptance
+        }
+        assert!(drafter.k() > 5, "K should increase with high acceptance, got {}", drafter.k());
+    }
+
+    #[test]
+    fn test_adaptive_drafter_decreases_k() {
+        let mut drafter = AdaptiveDrafter::new(5, 1, 15);
+        // Simulate low acceptance rate
+        for _ in 0..5 {
+            drafter.update(5, 1); // 20% acceptance
+        }
+        assert!(drafter.k() < 5, "K should decrease with low acceptance, got {}", drafter.k());
+    }
+
+    #[test]
+    fn test_adaptive_drafter_respects_bounds() {
+        let mut drafter = AdaptiveDrafter::new(3, 2, 4);
+        // Drive acceptance very low
+        for _ in 0..20 {
+            drafter.update(5, 0); // 0% acceptance
+        }
+        assert!(drafter.k() >= 2, "K should not go below min_k");
+        // Drive acceptance very high
+        let mut drafter2 = AdaptiveDrafter::new(3, 2, 4);
+        for _ in 0..20 {
+            drafter2.update(5, 5); // 100% acceptance
+        }
+        assert!(drafter2.k() <= 4, "K should not exceed max_k");
     }
 
     #[test]

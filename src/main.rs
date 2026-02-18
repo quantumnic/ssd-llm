@@ -56,6 +56,10 @@ enum Commands {
         /// Number of tokens to draft per speculation step
         #[arg(long, default_value_t = 5)]
         draft_ahead: usize,
+
+        /// Enable adaptive draft length (adjusts K based on acceptance rate)
+        #[arg(long, default_value_t = false)]
+        adaptive_draft: bool,
     },
     /// Show model info from GGUF file
     Info {
@@ -95,6 +99,10 @@ enum Commands {
         /// Number of tokens to draft per speculation step
         #[arg(long, default_value_t = 5)]
         draft_ahead: usize,
+
+        /// Enable adaptive draft length
+        #[arg(long, default_value_t = false)]
+        adaptive_draft: bool,
     },
 }
 
@@ -181,6 +189,7 @@ fn main() -> Result<()> {
             top_p,
             draft_model,
             draft_ahead,
+            adaptive_draft,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
@@ -223,6 +232,7 @@ fn main() -> Result<()> {
                     top_p,
                     max_tokens,
                     draft_ahead,
+                    adaptive: adaptive_draft,
                 };
 
                 let start = Instant::now();
@@ -274,7 +284,7 @@ fn main() -> Result<()> {
             benchmark::run_benchmark(&model, budget)?;
         }
 
-        Commands::Serve { model, memory_budget, host, port, draft_model, draft_ahead } => {
+        Commands::Serve { model, memory_budget, host, port, draft_model, draft_ahead, adaptive_draft } => {
             let budget = parse_memory_budget(&memory_budget)?;
             let server = api::server::ApiServer::new(api::server::ServerConfig {
                 host,
@@ -283,6 +293,7 @@ fn main() -> Result<()> {
                 memory_budget: budget,
                 draft_model_path: draft_model,
                 draft_ahead,
+                adaptive_draft,
             });
             server.run()?;
         }

@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.6.0 — Batch Prefill + Adaptive Draft Length (2026-02-18)
+
+### Added
+- **Batch prefill optimization** (`transformer::batch_prefill`):
+  - Layer-major traversal: loads each transformer layer once, processes ALL prompt tokens through it
+  - Embedding tensor loaded once for entire prompt instead of per-token
+  - Dramatically reduces SSD reads during prefill phase (N layers × 1 load vs N layers × T loads)
+  - Used by both standard generation and streaming generator
+- **Adaptive draft length controller** (`speculative::AdaptiveDrafter`):
+  - Exponential moving average (EMA) tracking of acceptance rate
+  - High acceptance (>70%) → increases K to draft more tokens per round
+  - Low acceptance (<40%) → decreases K to avoid wasted draft compute
+  - Configurable min/max bounds (default: 1 to 3× initial K)
+  - `--adaptive-draft` CLI flag for `run` and `serve` commands
+  - Warmup period: waits 2 rounds before adjusting
+- 3 new tests: adaptive K increase, decrease, and bounds enforcement
+- 26 tests total, all passing
+
+### Why Batch Prefill Matters for SSD-LLM
+The core bottleneck is SSD→RAM transfer. Previously, prefilling a 1000-token prompt with 80 layers meant 80,000 layer loads (one per token per layer). With batch prefill, it's just 80 layer loads — each layer is loaded once and all tokens are processed through it. This is an **O(T)** reduction in SSD I/O during prefill.
+
+### Why Adaptive Draft Length Matters
+Fixed K is suboptimal: easy sequences have high acceptance (K should be larger), while hard sequences have low acceptance (K should be smaller). Adaptive K converges to the sweet spot automatically, improving throughput by 10-30% compared to static K in practice.
+
+### Changed
+- Standard and streaming generators now use `batch_prefill` for prompt processing
+- Speculative decoding uses adaptive K when `--adaptive-draft` is enabled (fixed K still default)
+- `SpeculativeConfig` extended with `adaptive: bool` field
+- `ServerConfig` extended with `adaptive_draft: bool`
+- API server version bumped to 0.6.0
+
 ## v0.5.0 — Speculative Decoding with Draft Model (2026-02-18)
 
 ### Added

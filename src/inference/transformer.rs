@@ -28,6 +28,100 @@ pub struct GenerationResult {
     pub kv_cache_bytes: usize,
 }
 
+/// Batch prefill: process multiple tokens through all layers efficiently.
+/// Loads each layer once and processes all tokens through it before moving to the next layer.
+/// This minimizes SSD reads compared to the per-token approach.
+pub fn batch_prefill(
+    gguf: &GgufFile,
+    streamer: &SsdStreamer,
+    layer_cache: &mut LayerCache,
+    kv_cache: &mut KvCache,
+    token_embeddings: &[Vec<f32>],  // one embedding per token
+    start_position: usize,
+    prefetcher: &Prefetcher,
+) -> Result<Vec<f32>> {
+    let n_layers = gguf.n_layers();
+    let n_embd = gguf.n_embd() as usize;
+    let n_head = gguf.n_head() as usize;
+    let n_head_kv = gguf.n_head_kv() as usize;
+    let head_dim = n_embd / n_head;
+    let n_tokens = token_embeddings.len();
+
+    if n_tokens == 0 {
+        return Ok(vec![0.0f32; n_embd]);
+    }
+
+    // Initialize hidden states from embeddings
+    let mut hidden_states: Vec<Vec<f32>> = token_embeddings.to_vec();
+
+    for layer_idx in 0..n_layers {
+        // Issue prefetch for next layer(s)
+        prefetcher.on_layer_start(layer_idx, n_layers, streamer, gguf, layer_cache);
+
+        // Load layer once
+        if layer_cache.get(layer_idx).is_none() {
+            let layer = streamer.load_layer(gguf, layer_idx)?;
+            layer_cache.insert(layer_idx, layer);
+        }
+
+        let cached = layer_cache.get(layer_idx).unwrap();
+
+        // Process ALL tokens through this layer before moving to the next
+        for t in 0..n_tokens {
+            let position = start_position + t;
+            let hidden_state = &mut hidden_states[t];
+
+            // 1. RMS Norm (pre-attention)
+            let mut attn_input = hidden_state.clone();
+            if let Some(norm_w) = find_tensor_in_layer(cached, "attn_norm.weight", layer_idx) {
+                rms_norm(&mut attn_input, norm_w);
+            }
+
+            // 2. Self-Attention with KV cache
+            if let (Some(wq), Some(wk), Some(wv), Some(wo)) = (
+                find_tensor_in_layer(cached, "attn_q.weight", layer_idx),
+                find_tensor_in_layer(cached, "attn_k.weight", layer_idx),
+                find_tensor_in_layer(cached, "attn_v.weight", layer_idx),
+                find_tensor_in_layer(cached, "attn_output.weight", layer_idx),
+            ) {
+                let kv_layer = kv_cache.layer_mut(layer_idx as usize);
+                let attn_output = multi_head_attention_cached(
+                    &attn_input, wq, wk, wv, wo,
+                    n_head, n_head_kv, head_dim, position,
+                    kv_layer,
+                );
+                for i in 0..hidden_state.len() {
+                    hidden_state[i] += attn_output.get(i).copied().unwrap_or(0.0);
+                }
+            }
+
+            // 3. RMS Norm (pre-FFN)
+            let mut ffn_input = hidden_state.clone();
+            if let Some(norm_w) = find_tensor_in_layer(cached, "ffn_norm.weight", layer_idx) {
+                rms_norm(&mut ffn_input, norm_w);
+            }
+
+            // 4. Feed-Forward Network
+            if let (Some(w_gate), Some(w_up), Some(w_down)) = (
+                find_tensor_in_layer(cached, "ffn_gate.weight", layer_idx),
+                find_tensor_in_layer(cached, "ffn_up.weight", layer_idx),
+                find_tensor_in_layer(cached, "ffn_down.weight", layer_idx),
+            ) {
+                let ffn_output = feed_forward(&ffn_input, w_gate, w_up, w_down, n_embd);
+                for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
+                    *h += f;
+                }
+            }
+        }
+
+        // Signal layer done for eviction
+        prefetcher.on_layer_done(layer_idx, streamer, gguf);
+    }
+
+    // Return the last token's hidden state (needed for generation)
+    Ok(hidden_states.pop().unwrap_or_else(|| vec![0.0f32; n_embd]))
+}
+
 /// Run transformer forward pass (public entry point for speculative decoding)
 pub fn forward_pass_pub(
     gguf: &GgufFile,
@@ -172,21 +266,30 @@ pub fn generate(
 
     let start = Instant::now();
 
-    // Process prompt tokens (prefill phase)
-    for (pos, &token_id) in tokens.iter().enumerate() {
-        if let Ok(embeddings) = streamer.load_named_tensor_f32(gguf, "token_embd.weight") {
-            let embd_start = token_id as usize * n_embd;
-            let embd_end = embd_start + n_embd;
-            if embd_end <= embeddings.len() {
-                hidden_state = embeddings[embd_start..embd_end].to_vec();
+    // Batch prefill: load embeddings once, process layer-by-layer across all tokens
+    {
+        let embeddings = streamer.load_named_tensor_f32(gguf, "token_embd.weight").ok();
+        let mut token_embeddings: Vec<Vec<f32>> = Vec::with_capacity(prompt_len);
+        for &token_id in &tokens {
+            let mut emb = vec![0.0f32; n_embd];
+            if let Some(ref emb_data) = embeddings {
+                let start_idx = token_id as usize * n_embd;
+                let end_idx = start_idx + n_embd;
+                if end_idx <= emb_data.len() {
+                    emb = emb_data[start_idx..end_idx].to_vec();
+                }
             }
+            token_embeddings.push(emb);
         }
 
-        forward_pass(gguf, streamer, layer_cache, &mut kv_cache, &mut hidden_state, pos, &prefetcher)?;
+        hidden_state = batch_prefill(
+            gguf, streamer, layer_cache, &mut kv_cache,
+            &token_embeddings, 0, &prefetcher,
+        )?;
     }
 
     let prefill_time = start.elapsed();
-    info!("Prefill: {} tokens in {:.2}ms ({:.1} tok/s)",
+    info!("Prefill (batch): {} tokens in {:.2}ms ({:.1} tok/s)",
         prompt_len, prefill_time.as_millis(),
         prompt_len as f64 / prefill_time.as_secs_f64()
     );
@@ -367,16 +470,26 @@ pub fn generate_streaming<'a>(
     let mut kv_cache = KvCache::new(n_layers as usize, n_head_kv, head_dim, n_ctx);
     let mut hidden_state = vec![0.0f32; n_embd];
 
-    // Prefill
-    for (pos, &token_id) in tokens.iter().enumerate() {
-        if let Ok(embeddings) = streamer.load_named_tensor_f32(gguf, "token_embd.weight") {
-            let embd_start = token_id as usize * n_embd;
-            let embd_end = embd_start + n_embd;
-            if embd_end <= embeddings.len() {
-                hidden_state = embeddings[embd_start..embd_end].to_vec();
+    // Batch prefill — load embedding tensor once, layer-major traversal
+    {
+        let embeddings = streamer.load_named_tensor_f32(gguf, "token_embd.weight").ok();
+        let mut token_embeddings: Vec<Vec<f32>> = Vec::with_capacity(tokens.len());
+        for &token_id in &tokens {
+            let mut emb = vec![0.0f32; n_embd];
+            if let Some(ref emb_data) = embeddings {
+                let s = token_id as usize * n_embd;
+                let e = s + n_embd;
+                if e <= emb_data.len() {
+                    emb = emb_data[s..e].to_vec();
+                }
             }
+            token_embeddings.push(emb);
         }
-        forward_pass(gguf, streamer, layer_cache, &mut kv_cache, &mut hidden_state, pos, &prefetcher)?;
+
+        hidden_state = batch_prefill(
+            gguf, streamer, layer_cache, &mut kv_cache,
+            &token_embeddings, 0, &prefetcher,
+        )?;
     }
 
     Ok(StreamingGenerator {

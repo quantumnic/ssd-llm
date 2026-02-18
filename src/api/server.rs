@@ -29,6 +29,7 @@ pub struct ServerConfig {
     pub memory_budget: usize,
     pub draft_model_path: Option<PathBuf>,
     pub draft_ahead: usize,
+    pub adaptive_draft: bool,
 }
 
 /// Model context shared across requests
@@ -137,7 +138,7 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("POST", "/api/chat") => handle_chat(&mut stream, ctx, &body_str),
         ("POST", "/v1/chat/completions") => handle_openai_chat(&mut stream, ctx, &body_str),
         ("GET", "/") => send_json_response(&mut stream, 200,
-            r#"{"status":"ssd-llm is running","version":"0.5.0"}"#),
+            r#"{"status":"ssd-llm is running","version":"0.6.0"}"#),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
 }
