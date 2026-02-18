@@ -99,7 +99,15 @@ fn main() -> Result<()> {
 
     // Check Metal availability on startup
     if metal::compute::MetalCompute::is_available() {
-        println!("✓ Metal GPU acceleration available");
+        if let Some(mc) = metal::compute::MetalCompute::new() {
+            if mc.has_gpu() {
+                println!("✓ Metal GPU acceleration active (metal-rs)");
+            } else {
+                println!("✓ Metal GPU available (CPU SIMD)");
+            }
+        } else {
+            println!("✓ Metal GPU available (CPU SIMD fallback)");
+        }
     } else {
         println!("⚠ Metal not available, using CPU only");
     }

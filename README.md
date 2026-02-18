@@ -35,7 +35,9 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🗺️ mmap + madvise** — OS-level memory-mapped files with intelligent page hints
 - **⚡ Metal Compute** — SIMD-optimized matmul, softmax, RoPE, RMSNorm with Metal shader foundation
 - **📄 GGUF Support** — Compatible with llama.cpp quantization formats (Q4_0, Q8_0, F16, F32)
+- **🔤 BPE Tokenizer** — Full Byte-Pair Encoding with SentencePiece support from GGUF vocabulary
 - **🔌 Ollama-compatible API** — Drop-in replacement server with OpenAI-compatible endpoint
+- **📡 Streaming** — Real-time token-by-token streaming via chunked transfer (Ollama) and SSE (OpenAI)
 
 ## Quick Start
 
@@ -114,7 +116,7 @@ The fast SSD + unified memory means layer streaming has very low overhead on Mac
 
 ## Benchmarks
 
-> v0.3 — KV cache, Metal shaders compiled, SwiGLU FFN, quantized GPU kernels
+> v0.4 — metal-rs GPU dispatch, BPE tokenizer, streaming API responses
 
 | Model | Quant | Size | Memory Budget | Layer Load | Est. tok/s |
 |---|---|---|---|---|---|
@@ -152,9 +154,10 @@ src/
     kv_cache.rs        — Key-Value cache for autoregressive generation
     feed_forward.rs    — SwiGLU FFN
     sampler.rs         — Temperature, Top-K, Top-P sampling (xorshift64)
-    tokenizer.rs       — Basic tokenizer from GGUF vocab
+    tokenizer.rs       — BPE tokenizer with SentencePiece support
   metal/
-    compute.rs         — Metal compute + SIMD-optimized ops
+    compute.rs         — Metal compute + SIMD-optimized ops (auto GPU dispatch)
+    gpu.rs             — metal-rs GPU pipeline (real Metal compute)
     shaders/           — .metal compute shaders (matmul, rmsnorm, rope, softmax)
   ssd/
     streamer.rs        — SSD → RAM streaming engine
@@ -181,7 +184,7 @@ This project builds on insights from:
 - [x] v0.1 — GGUF parser, mmap loader, LRU cache, prefetcher, CPU inference
 - [x] v0.2 — Metal compute foundation, SIMD ops, Ollama + OpenAI API server
 - [x] v0.3 — KV cache, Metal shader compilation, SwiGLU FFN, quantized GPU kernels (Q4_0/Q8_0)
-- [ ] v0.4 — Full Metal GPU dispatch via metal-rs, BPE tokenizer, streaming responses
+- [x] v0.4 — Full Metal GPU dispatch via metal-rs, BPE tokenizer, streaming responses
 - [ ] v0.5 — Speculative decoding with draft model
 - [ ] v1.0 — Production-ready, benchmarked against llama.cpp
 

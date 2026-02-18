@@ -6,6 +6,7 @@
 //! v0.3: Added Metal shader compilation, GPU dispatch for matvec/rmsnorm/softmax,
 //!       and quantized Q4_0/Q8_0 on-GPU dequant+matmul kernels.
 
+use crate::metal::gpu::MetalGpu;
 use tracing::{debug, info, warn};
 
 /// Threshold below which CPU is faster than GPU dispatch overhead
@@ -16,6 +17,8 @@ pub struct MetalCompute {
     available: bool,
     /// Pre-compiled shader library path
     shader_lib: Option<String>,
+    /// Real Metal GPU context (v0.4)
+    gpu: Option<MetalGpu>,
 }
 
 unsafe impl Send for MetalCompute {}
@@ -47,15 +50,21 @@ impl MetalCompute {
 
         // Try to compile Metal shaders
         let shader_lib = Self::compile_shaders();
-        if shader_lib.is_some() {
-            info!("Metal GPU acceleration ready (shaders compiled)");
+
+        // Try to initialize real GPU dispatch via metal-rs
+        let gpu = MetalGpu::new();
+        if gpu.is_some() {
+            info!("Metal GPU acceleration ready (metal-rs pipelines compiled)");
+        } else if shader_lib.is_some() {
+            info!("Metal GPU acceleration ready (shaders compiled, CPU dispatch)");
         } else {
-            info!("Metal GPU available (using CPU SIMD — full GPU dispatch requires metal-rs)");
+            info!("Metal GPU available (using CPU SIMD)");
         }
 
         Some(Self {
             available: true,
             shader_lib,
+            gpu,
         })
     }
 
@@ -122,17 +131,40 @@ impl MetalCompute {
 
     /// GPU-accelerated matrix-vector multiply (falls back to SIMD CPU)
     pub fn matvec_f32(&self, w: &[f32], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
-        // TODO: Full Metal dispatch via metal-rs crate (v0.4)
-        // For now, use SIMD CPU which auto-vectorizes to NEON/AMX on Apple Silicon
+        #[cfg(target_os = "macos")]
+        if let Some(ref gpu) = self.gpu {
+            if gpu.should_dispatch(out_dim * in_dim) {
+                return gpu.matvec_f32(w, x, out_dim, in_dim);
+            }
+        }
         matvec_f32_simd(w, x, out_dim, in_dim)
     }
 
     pub fn rmsnorm_f32(&self, x: &mut [f32], weight: &[f32], eps: f32) {
+        #[cfg(target_os = "macos")]
+        if let Some(ref gpu) = self.gpu {
+            if gpu.should_dispatch(x.len()) {
+                gpu.rmsnorm_f32(x, weight, eps);
+                return;
+            }
+        }
         rmsnorm_f32_fast(x, weight, eps);
     }
 
     pub fn softmax_f32(&self, x: &mut [f32]) {
+        #[cfg(target_os = "macos")]
+        if let Some(ref gpu) = self.gpu {
+            if gpu.should_dispatch(x.len()) {
+                gpu.softmax_f32(x);
+                return;
+            }
+        }
         softmax_f32_fast(x);
+    }
+
+    /// Whether GPU dispatch is active
+    pub fn has_gpu(&self) -> bool {
+        self.gpu.is_some()
     }
 
     /// Get path to compiled shader library

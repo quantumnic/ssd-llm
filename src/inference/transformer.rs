@@ -251,3 +251,132 @@ pub fn generate(
 fn matmul_1d(x: &[f32], weight: &[f32], output_dim: usize) -> Vec<f32> {
     crate::metal::compute::matvec_f32_simd(weight, x, output_dim, x.len())
 }
+
+/// Streaming generator — yields one token at a time
+pub struct StreamingGenerator<'a> {
+    gguf: &'a GgufFile,
+    streamer: &'a SsdStreamer,
+    layer_cache: &'a mut LayerCache,
+    kv_cache: KvCache,
+    hidden_state: Vec<f32>,
+    tokenizer: SimpleTokenizer,
+    sampler: Sampler,
+    prefetcher: Prefetcher,
+    position: usize,
+    remaining: usize,
+    done: bool,
+}
+
+impl<'a> StreamingGenerator<'a> {
+    /// Get the next generated token as a string, or None if done
+    pub fn next_token(&mut self) -> Result<Option<String>> {
+        if self.done || self.remaining == 0 {
+            return Ok(None);
+        }
+
+        if self.kv_cache.is_full() {
+            self.done = true;
+            return Ok(None);
+        }
+
+        let n_embd = self.gguf.n_embd() as usize;
+        let vocab_size = self.gguf.vocab_size() as usize;
+
+        // Final RMS norm + project to vocab
+        let mut final_hidden = self.hidden_state.clone();
+        if let Ok(norm_w) = self.streamer.load_named_tensor_f32(self.gguf, "output_norm.weight") {
+            rms_norm(&mut final_hidden, &norm_w);
+        }
+
+        let logits = if let Ok(output_weight) = self.streamer.load_named_tensor_f32(self.gguf, "output.weight") {
+            matmul_1d(&final_hidden, &output_weight, vocab_size)
+        } else if let Ok(embd_weight) = self.streamer.load_named_tensor_f32(self.gguf, "token_embd.weight") {
+            matmul_1d(&final_hidden, &embd_weight, vocab_size)
+        } else {
+            vec![0.0f32; vocab_size]
+        };
+
+        let token_id = self.sampler.sample(&logits);
+
+        if token_id == self.tokenizer.eos_id || token_id == 0 {
+            self.done = true;
+            return Ok(None);
+        }
+
+        let token_text = self.tokenizer.decode_token(token_id);
+
+        // Embed new token and forward
+        if let Ok(embeddings) = self.streamer.load_named_tensor_f32(self.gguf, "token_embd.weight") {
+            let embd_start = token_id as usize * n_embd;
+            let embd_end = embd_start + n_embd;
+            if embd_end <= embeddings.len() {
+                self.hidden_state = embeddings[embd_start..embd_end].to_vec();
+            }
+        }
+
+        forward_pass(
+            self.gguf, self.streamer, self.layer_cache,
+            &mut self.kv_cache, &mut self.hidden_state,
+            self.position, &self.prefetcher,
+        )?;
+
+        self.position += 1;
+        self.remaining -= 1;
+
+        Ok(Some(token_text))
+    }
+}
+
+/// Create a streaming generator that yields tokens one at a time
+pub fn generate_streaming<'a>(
+    gguf: &'a GgufFile,
+    streamer: &'a SsdStreamer,
+    layer_cache: &'a mut LayerCache,
+    prompt: &str,
+    config: &InferenceConfig,
+) -> Result<StreamingGenerator<'a>> {
+    let n_embd = gguf.n_embd() as usize;
+    let n_layers = gguf.n_layers();
+    let n_head = gguf.n_head() as usize;
+    let n_head_kv = gguf.n_head_kv() as usize;
+    let head_dim = n_embd / n_head;
+    let n_ctx = gguf.n_ctx() as usize;
+
+    if n_embd == 0 || n_layers == 0 {
+        anyhow::bail!("Invalid model: n_embd={}, n_layers={}", n_embd, n_layers);
+    }
+
+    let prefetcher = Prefetcher::new(PrefetchStrategy::LookAhead(2));
+    let sampler = Sampler::new(config.temperature, config.top_k, config.top_p);
+    let tokenizer = SimpleTokenizer::from_gguf(gguf);
+    let tokens = tokenizer.encode(prompt);
+
+    let mut kv_cache = KvCache::new(n_layers as usize, n_head_kv, head_dim, n_ctx);
+    let mut hidden_state = vec![0.0f32; n_embd];
+
+    // Prefill
+    for (pos, &token_id) in tokens.iter().enumerate() {
+        if let Ok(embeddings) = streamer.load_named_tensor_f32(gguf, "token_embd.weight") {
+            let embd_start = token_id as usize * n_embd;
+            let embd_end = embd_start + n_embd;
+            if embd_end <= embeddings.len() {
+                hidden_state = embeddings[embd_start..embd_end].to_vec();
+            }
+        }
+        forward_pass(gguf, streamer, layer_cache, &mut kv_cache, &mut hidden_state, pos, &prefetcher)?;
+    }
+
+    Ok(StreamingGenerator {
+        gguf,
+        streamer,
+        layer_cache,
+        kv_cache,
+        hidden_state,
+        tokenizer,
+        sampler,
+        prefetcher,
+        position: tokens.len(),
+        remaining: config.max_tokens,
+        done: false,
+    })
+}

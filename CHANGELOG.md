@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.4.0 — Metal GPU Dispatch + BPE Tokenizer + Streaming (2026-02-18)
+
+### Added
+- **Full Metal GPU dispatch via metal-rs** — real GPU compute pipelines for:
+  - `matvec_f32` — matrix-vector multiply on GPU
+  - `rmsnorm_f32` — RMS normalization (two-phase GPU reduction)
+  - `softmax_f32` — numerically stable softmax on GPU
+  - `rope_f32` — Rotary Position Embeddings on GPU
+  - `silu_f32` — SiLU activation on GPU
+  - Automatic CPU/GPU dispatch based on tensor size threshold (4096 elements)
+- **BPE Tokenizer** with full Byte-Pair Encoding support:
+  - Standard BPE with explicit merge rules from GGUF metadata
+  - SentencePiece-style BPE using token scores for merge priority
+  - Byte-level fallback (`<0xNN>`) for unknown characters
+  - `decode_token()` for single-token streaming decode
+  - Greedy longest-match fallback for models without merge data
+- **Streaming API responses** for all endpoints:
+  - Ollama `/api/generate` and `/api/chat`: chunked transfer encoding (NDJSON)
+  - OpenAI `/v1/chat/completions`: Server-Sent Events (SSE)
+  - `stream` parameter (default: true for Ollama, false for OpenAI)
+  - Token-by-token delivery as they're generated
+- **`StreamingGenerator`** — iterator-style token generation for the inference engine
+
+### Changed
+- `MetalCompute` now auto-dispatches to real GPU pipelines when metal-rs is available
+- Tokenizer upgraded from simple greedy to full BPE (backward compatible)
+- API server version bumped to 0.4.0
+- Updated README: roadmap, architecture docs, feature list
+
+### Dependencies
+- Added `metal` 0.29, `objc` 0.2, `block` 0.1 (macOS only)
+- Added `serde` 1.0, `serde_json` 1.0
+
 ## v0.2.0 — Metal Compute + API Server (2026-02-18)
 
 ### Added
