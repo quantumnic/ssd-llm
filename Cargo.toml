@@ -1,6 +1,6 @@
 [package]
 name = "ssd-llm"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Run 70B+ LLMs on Apple Silicon by using SSD as extended memory"
 license = "MIT"

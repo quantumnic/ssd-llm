@@ -44,6 +44,9 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **📦 Prompt Prefix Caching** — Reuse KV cache states for repeated prompt prefixes (system prompts, templates)
 - **🔄 Continuous Batching** — Handle multiple concurrent requests, share layer loads across sequences
 - **🔀 Tensor Parallelism** — Split matmul across multiple threads for better GPU/CPU utilization
+- **🪟 Sliding Window Attention** — Limit attention to recent W tokens with optional sink tokens for bounded memory
+- **🔗 GQA Optimization** — Grouped-Query Attention with batched KV loads, auto-detected from model config
+- **💾 Memory-Mapped KV Cache** — Spill KV cache to SSD via mmap when RAM is exhausted, enabling ultra-long contexts
 
 ## Quick Start
 
@@ -80,6 +83,15 @@ ssd-llm run model-70b.gguf --prompt "Hello" --tensor-parallel 4
 
 # Continuous batching server (handles 8 concurrent requests)
 ssd-llm serve model.gguf --memory-budget 8G --max-batch 8 --prompt-cache
+
+# Sliding window attention (bounded memory for long contexts)
+ssd-llm run model.gguf --prompt "Hello" --sliding-window 4096 --sink-tokens 4
+
+# Memory-mapped KV cache (ultra-long contexts, spills to SSD)
+ssd-llm run model.gguf --prompt "Hello" --mmap-kv --max-tokens 32768
+
+# GQA is auto-detected — just run and see the optimization message
+ssd-llm run llama-70b.gguf --prompt "Hello" --memory-budget 16G
 ```
 
 ## API Server
@@ -246,7 +258,7 @@ This project builds on insights from:
 - [x] v0.5 — Speculative decoding with draft model, KV cache rollback
 - [x] v0.6 — Batch prefill optimization, adaptive draft length
 - [x] v0.7 — Continuous batching, prompt caching, tensor parallelism
-- [ ] v0.8 — Sliding window attention, GQA optimization, memory-mapped KV cache
+- [x] v0.8 — Sliding window attention, GQA optimization, memory-mapped KV cache
 - [ ] v1.0 — Production-ready, benchmarked against llama.cpp
 
 ## Requirements

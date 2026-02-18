@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.8.0 — Sliding Window Attention + GQA Optimization + Memory-Mapped KV Cache (2026-02-18)
+
+### Added
+- **Sliding window attention** (`inference/sliding_window.rs`):
+  - Limit attention to the most recent W tokens instead of the full sequence
+  - Configurable window size via `--sliding-window <W>` (0 = full attention)
+  - Sink tokens: keep first N tokens always visible (BOS, system prompt) via `--sink-tokens <N>`
+  - `AttentionRange` abstraction for clean position iteration
+  - KV eviction helper: `evict_outside_window()` reclaims memory from expired positions
+  - Combined sliding window + GQA path for maximum efficiency
+  - 7 new tests: range computation, windowed/full/disabled modes, sink tokens, eviction
+- **GQA optimization** (`inference/gqa.rs`):
+  - Dedicated grouped-query attention path that batches KV loads per group
+  - Pre-fetches all K/V vectors once per KV head, then iterates query heads in the group
+  - 4-wide SIMD dot product accumulator for cache-friendly score computation
+  - Auto-detection of attention strategy: MHA, GQA, or MQA from model config
+  - KV memory savings reporting (e.g., GQA with group_size=4 → 75% KV savings)
+  - Combined `gqa_sliding_window_attention()` for GQA + window in one pass
+  - `AttentionStrategy` enum for runtime strategy selection
+  - 6 new tests: basic GQA, multi-token, sliding window combo, SIMD dot product, strategy detection, savings ratio
+- **Memory-mapped KV cache** (`inference/mmap_kv_cache.rs`):
+  - Hot/cold architecture: recent tokens in RAM, older tokens mmap'd from SSD
+  - Automatic spill: when RAM budget is exceeded, oldest 25% of hot entries move to cold
+  - mmap with `MADV_RANDOM` hints for decode-phase access patterns
+  - Transparent API: `key_at()`/`value_at()` work across hot and cold seamlessly
+  - Per-layer backing files with automatic cleanup on drop
+  - `--mmap-kv` CLI flag for `run` and `serve` commands
+  - 5 new tests: basic operations, spill trigger, cold read, rollback, clear
+- 18 new tests (55 total, all passing)
+- CLI: `run` gains `--sliding-window`, `--sink-tokens`, `--mmap-kv` flags
+- CLI: `serve` gains `--sliding-window`, `--sink-tokens`, `--mmap-kv` flags
+- Auto-detection of GQA/MQA models with optimization message on startup
+
+### Why Sliding Window Matters for SSD-LLM
+Long-context inference (32K+ tokens) makes the KV cache enormous. With sliding window, only the last W positions are attended to, bounding both memory and compute. Sink tokens ensure the model always sees its BOS token and system prompt. For SSD-LLM specifically, smaller KV cache means more RAM budget available for layer caching, improving SSD→RAM streaming throughput.
+
+### Why GQA Optimization Matters for SSD-LLM
+Modern 70B+ models (Llama 2 70B: n_head=64, n_head_kv=8) use GQA to reduce KV cache size by 8x. Our optimized path loads each KV head's data once per group instead of repeating it per query head, reducing cache pressure. With SSD streaming, every byte of RAM is precious — GQA's 75% KV savings means more room for layer caching.
+
+### Why Memory-Mapped KV Cache Matters for SSD-LLM
+The entire premise of ssd-llm is using SSD as extended memory. The mmap KV cache extends this philosophy to the KV cache itself — when generating very long sequences, older KV entries spill to SSD transparently. The OS handles paging, and frequently-accessed cold entries get promoted back to RAM automatically. This enables context lengths that would otherwise be impossible on memory-constrained devices.
+
+### Changed
+- CLI: `run` and `serve` gain 3 new flags each
+- GQA detection logged on model load (shows group size and KV savings)
+- Cargo.toml version bumped to 0.8.0
+- API server version bumped to 0.8.0
+- README: updated features, CLI examples, architecture, roadmap
+
 ## v0.7.0 — Continuous Batching + Prompt Caching + Tensor Parallelism (2026-02-18)
 
 ### Added

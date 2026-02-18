@@ -68,6 +68,18 @@ enum Commands {
         /// Number of tensor parallel shards (0 = auto-detect)
         #[arg(long, default_value_t = 0)]
         tensor_parallel: usize,
+
+        /// Sliding window attention size (0 = full attention)
+        #[arg(long, default_value_t = 0)]
+        sliding_window: usize,
+
+        /// Number of sink tokens to keep visible with sliding window
+        #[arg(long, default_value_t = 4)]
+        sink_tokens: usize,
+
+        /// Enable memory-mapped KV cache (spills to SSD when RAM is full)
+        #[arg(long, default_value_t = false)]
+        mmap_kv: bool,
     },
     /// Show model info from GGUF file
     Info {
@@ -123,6 +135,18 @@ enum Commands {
         /// Number of tensor parallel shards (0 = auto-detect)
         #[arg(long, default_value_t = 0)]
         tensor_parallel: usize,
+
+        /// Sliding window attention size (0 = full attention)
+        #[arg(long, default_value_t = 0)]
+        sliding_window: usize,
+
+        /// Number of sink tokens to keep visible with sliding window
+        #[arg(long, default_value_t = 4)]
+        sink_tokens: usize,
+
+        /// Enable memory-mapped KV cache (spills to SSD when RAM is full)
+        #[arg(long, default_value_t = false)]
+        mmap_kv: bool,
     },
 }
 
@@ -212,6 +236,9 @@ fn main() -> Result<()> {
             adaptive_draft,
             prompt_cache,
             tensor_parallel,
+            sliding_window,
+            sink_tokens,
+            mmap_kv,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
@@ -243,6 +270,33 @@ fn main() -> Result<()> {
                 else { inference::tensor_parallel::auto_detect_shards(gguf.n_embd() as usize) };
             if tp_shards > 1 {
                 println!("🔀 Tensor parallelism: {} shards", tp_shards);
+            }
+
+            // Sliding window attention
+            if sliding_window > 0 {
+                println!("🪟 Sliding window attention: {} tokens (sink: {})", sliding_window, sink_tokens);
+            }
+
+            // GQA detection
+            let n_head = gguf.n_head() as usize;
+            let n_head_kv = gguf.n_head_kv() as usize;
+            let attn_strategy = inference::gqa::AttentionStrategy::detect(n_head, n_head_kv);
+            match attn_strategy {
+                inference::gqa::AttentionStrategy::GroupedQuery { group_size } => {
+                    println!("🔗 GQA optimized: {} groups of {} query heads (KV savings: {:.0}%)",
+                        n_head_kv, group_size,
+                        (1.0 - attn_strategy.kv_savings_ratio(n_head)) * 100.0);
+                }
+                inference::gqa::AttentionStrategy::MultiQuery => {
+                    println!("🔗 MQA detected: single KV head (KV savings: {:.0}%)",
+                        (1.0 - attn_strategy.kv_savings_ratio(n_head)) * 100.0);
+                }
+                _ => {}
+            }
+
+            // Memory-mapped KV cache
+            if mmap_kv {
+                println!("💾 Memory-mapped KV cache enabled (spills to SSD)");
             }
 
             // Prompt caching
@@ -319,7 +373,7 @@ fn main() -> Result<()> {
             benchmark::run_benchmark(&model, budget)?;
         }
 
-        Commands::Serve { model, memory_budget, host, port, draft_model, draft_ahead, adaptive_draft, prompt_cache, max_batch, tensor_parallel } => {
+        Commands::Serve { model, memory_budget, host, port, draft_model, draft_ahead, adaptive_draft, prompt_cache, max_batch, tensor_parallel, sliding_window, sink_tokens, mmap_kv } => {
             let budget = parse_memory_budget(&memory_budget)?;
             let tp_shards = if tensor_parallel > 0 { tensor_parallel }
                 else { inference::tensor_parallel::auto_detect_shards(budget) };
