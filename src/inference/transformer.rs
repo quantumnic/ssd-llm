@@ -3,7 +3,7 @@
 use crate::inference::attention::multi_head_attention_cached;
 use crate::inference::feed_forward::feed_forward;
 use crate::inference::kv_cache::KvCache;
-use crate::inference::sampler::Sampler;
+use crate::inference::sampler::{MirostatMode, Sampler};
 use crate::inference::tokenizer::SimpleTokenizer;
 use crate::model::cache::{CachedLayer, LayerCache};
 use crate::model::gguf::GgufFile;
@@ -22,6 +22,55 @@ pub struct InferenceConfig {
     pub repetition_penalty: f32,
     pub frequency_penalty: f32,
     pub presence_penalty: f32,
+    /// Tail-Free Sampling z parameter (0.0 = disabled, 0.95 = typical)
+    pub tfs_z: f32,
+    /// Mirostat mode: 0 = disabled, 1 = v1, 2 = v2
+    pub mirostat: u8,
+    /// Mirostat target surprise (tau), default 5.0
+    pub mirostat_tau: f32,
+    /// Mirostat learning rate (eta), default 0.1
+    pub mirostat_eta: f32,
+}
+
+/// Build the appropriate sampler from inference configuration
+fn build_sampler(config: &InferenceConfig) -> Sampler {
+    match config.mirostat {
+        1 => Sampler::with_mirostat(
+            config.temperature,
+            MirostatMode::V1,
+            config.mirostat_tau,
+            config.mirostat_eta,
+        ),
+        2 => Sampler::with_mirostat(
+            config.temperature,
+            MirostatMode::V2,
+            config.mirostat_tau,
+            config.mirostat_eta,
+        ),
+        _ => {
+            if config.tfs_z > 0.0 && config.tfs_z < 1.0 {
+                Sampler::with_tfs(
+                    config.temperature,
+                    config.top_k,
+                    config.top_p,
+                    config.tfs_z,
+                    config.repetition_penalty,
+                    config.frequency_penalty,
+                    config.presence_penalty,
+                )
+            } else {
+                Sampler::with_min_p(
+                    config.temperature,
+                    config.top_k,
+                    config.top_p,
+                    0.0,
+                    config.repetition_penalty,
+                    config.frequency_penalty,
+                    config.presence_penalty,
+                )
+            }
+        }
+    }
 }
 
 pub struct GenerationResult {
@@ -289,7 +338,7 @@ pub fn generate(
     );
 
     let prefetcher = Prefetcher::new(PrefetchStrategy::LookAhead(2));
-    let sampler = Sampler::new(config.temperature, config.top_k, config.top_p);
+    let sampler = build_sampler(config);
 
     // Initialize KV cache
     let mut kv_cache = KvCache::new(n_layers as usize, n_head_kv, head_dim, n_ctx);
@@ -622,7 +671,7 @@ pub fn generate_streaming<'a>(
     }
 
     let prefetcher = Prefetcher::new(PrefetchStrategy::LookAhead(2));
-    let sampler = Sampler::new(config.temperature, config.top_k, config.top_p);
+    let sampler = build_sampler(config);
     let tokenizer = SimpleTokenizer::from_gguf(gguf);
     let tokens = tokenizer.encode(prompt);
 

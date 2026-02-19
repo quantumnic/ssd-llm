@@ -63,6 +63,8 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🗜️ KV Cache Quantization** — INT8 per-row quantized KV cache for 4x memory reduction, enabling much longer context windows
 - **📐 RoPE Scaling** — Linear, NTK-aware, and YaRN scaling methods for extended context windows beyond training length
 - **🎲 Min-P Sampling** — Adaptive probability filtering that scales with model confidence for better quality/diversity trade-off
+- **✂️ Tail-Free Sampling (TFS)** — Second-derivative based tail removal for cleaner distributions than top-p
+- **🎯 Mirostat v1 & v2** — Adaptive perplexity-controlled sampling that maintains target surprise level for coherent text
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start

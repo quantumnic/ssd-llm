@@ -261,6 +261,10 @@ fn handle_generate(
     let temperature = extract_json_float(body, "temperature").unwrap_or(0.7);
     let top_k = extract_json_number(body, "top_k").unwrap_or(40) as usize;
     let top_p = extract_json_float(body, "top_p").unwrap_or(0.9);
+    let tfs_z = extract_json_float(body, "tfs_z").unwrap_or(0.0);
+    let mirostat = extract_json_number(body, "mirostat").unwrap_or(0) as u8;
+    let mirostat_tau = extract_json_float(body, "mirostat_tau").unwrap_or(5.0);
+    let mirostat_eta = extract_json_float(body, "mirostat_eta").unwrap_or(0.1);
     let streaming = extract_json_bool(body, "stream").unwrap_or(true);
 
     let config = InferenceConfig {
@@ -272,6 +276,10 @@ fn handle_generate(
         repetition_penalty: 1.0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        tfs_z,
+        mirostat,
+        mirostat_tau,
+        mirostat_eta,
     };
 
     if streaming {
@@ -383,6 +391,10 @@ fn handle_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &st
         repetition_penalty: extract_json_float(body, "repeat_penalty").unwrap_or(1.0),
         frequency_penalty: extract_json_float(body, "frequency_penalty").unwrap_or(0.0),
         presence_penalty: extract_json_float(body, "presence_penalty").unwrap_or(0.0),
+        tfs_z: extract_json_float(body, "tfs_z").unwrap_or(0.0),
+        mirostat: extract_json_number(body, "mirostat").unwrap_or(0) as u8,
+        mirostat_tau: extract_json_float(body, "mirostat_tau").unwrap_or(5.0),
+        mirostat_eta: extract_json_float(body, "mirostat_eta").unwrap_or(0.1),
     };
 
     if streaming {
@@ -515,6 +527,10 @@ fn handle_openai_chat(
         repetition_penalty: 1.0,
         frequency_penalty: extract_json_float(body, "frequency_penalty").unwrap_or(0.0),
         presence_penalty: extract_json_float(body, "presence_penalty").unwrap_or(0.0),
+        tfs_z: 0.0,
+        mirostat: 0,
+        mirostat_tau: 5.0,
+        mirostat_eta: 0.1,
     };
 
     if streaming {

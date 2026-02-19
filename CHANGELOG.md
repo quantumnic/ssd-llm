@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.6.0 — Tail-Free Sampling + Mirostat v1/v2 (2026-02-19)
+
+### Added
+- **Tail-Free Sampling (TFS)** (`sampler.rs`):
+  - Uses second derivative of sorted probability distribution to identify and remove the "tail"
+  - More principled than top-p: adapts cutoff based on distribution shape, not arbitrary percentile
+  - `tfs_z` parameter (0.0 = disabled, 0.95 = moderate, 1.0 = no filtering)
+  - `Sampler::with_tfs()` constructor with full penalty support
+  - `tail_free_filter()` function: softmax → first derivative → second derivative → normalize → cumulative cutoff
+  - 3 new tests: tail filtering, disabled-at-one, direct filter function
+- **Mirostat v1 & v2 adaptive sampling** (`sampler.rs`):
+  - **Mirostat v1**: Estimates Zipf exponent from top probabilities, computes optimal k to achieve target perplexity
+  - **Mirostat v2**: Simplified truncation — keeps tokens whose surprise (-log₂p) ≤ mu, adapts mu toward target tau
+  - Both maintain running `mu` state that converges toward `2 * tau`, producing text with consistent perplexity
+  - `MirostatMode` enum: `Disabled`, `V1`, `V2`
+  - `Sampler::with_mirostat(temperature, mode, tau, eta)` constructor
+  - `mirostat_tau`: target surprise level (default 5.0, lower = more focused)
+  - `mirostat_eta`: learning rate for mu adaptation (default 0.1)
+  - Zipf exponent estimation via `estimate_zipf_s()` and generalized harmonic number approximation
+  - 6 new tests: v1/v2 valid output, mu adaptation, greedy-at-zero-temp, v1 mu convergence, Zipf estimation
+- **API support** for all new parameters:
+  - Ollama API: `tfs_z`, `mirostat` (0/1/2), `mirostat_tau`, `mirostat_eta`
+  - Chat endpoint: same parameters
+  - Config file: `[inference]` section supports all new fields
+- **`build_sampler()` helper** in transformer.rs — dispatches to correct sampler constructor based on InferenceConfig
+- 9 new tests (132 → 141 total, all passing)
+
+### Why Mirostat Matters
+Standard sampling (top-k, top-p) uses fixed truncation regardless of model confidence. Mirostat adaptively adjusts truncation to maintain a target "surprise" level — producing text that's neither boringly repetitive (surprise too low) nor incoherently random (surprise too high). This is especially valuable for long-form generation where fixed parameters degrade over time.
+
+### Why TFS Matters
+Top-p keeps tokens by cumulative probability, which can include many low-probability "tail" tokens in flat distributions. TFS identifies where the probability distribution's rate of change drops off (via second derivative) and cuts precisely there. This gives cleaner, more natural sampling without the arbitrary percentile choice of top-p.
+
+### Changed
+- `InferenceConfig` (transformer.rs) extended with `tfs_z`, `mirostat`, `mirostat_tau`, `mirostat_eta`
+- `InferenceConfig` (config.rs) extended with same fields + TOML parsing
+- All API endpoints updated to parse and pass new sampling parameters
+- Cargo.toml version bumped to 1.6.0
+
 ## v1.2.0 — Chat Templates, Stop Sequences & Sampling Penalties (2026-02-19)
 
 ### Added

@@ -351,6 +351,10 @@ fn main() -> Result<()> {
                 repetition_penalty: 1.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
+                tfs_z: 0.0,
+                mirostat: 0,
+                mirostat_tau: 5.0,
+                mirostat_eta: 0.1,
             };
 
             // Tensor parallelism
