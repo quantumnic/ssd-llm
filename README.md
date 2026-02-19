@@ -60,6 +60,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🛑 Stop Sequences** — Early generation termination on configurable stop strings
 - **🔁 Repetition Penalties** — Repetition, frequency, and presence penalties to reduce repetitive output
 - **🔢 K-Quant Support** — GPU-accelerated Q4_K and Q6_K dequantization via Metal shaders, plus CPU fallback for all K-quant types
+- **🗜️ KV Cache Quantization** — INT8 per-row quantized KV cache for 4x memory reduction, enabling much longer context windows
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start

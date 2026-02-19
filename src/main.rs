@@ -97,6 +97,10 @@ enum Commands {
         /// Use flash attention (memory-efficient fused attention kernel)
         #[arg(long, default_value_t = false)]
         flash_attention: bool,
+
+        /// Enable INT8 KV cache quantization (4x memory reduction, longer contexts)
+        #[arg(long, default_value_t = false)]
+        kv_quantize: bool,
     },
     /// Show model info from GGUF file
     Info {
@@ -172,6 +176,10 @@ enum Commands {
         /// Use flash attention (memory-efficient fused attention kernel)
         #[arg(long, default_value_t = false)]
         flash_attention: bool,
+
+        /// Enable INT8 KV cache quantization (4x memory reduction, longer contexts)
+        #[arg(long, default_value_t = false)]
+        kv_quantize: bool,
     },
     /// Download a GGUF model from Hugging Face
     Pull {
@@ -306,6 +314,7 @@ fn main() -> Result<()> {
             sink_tokens,
             mmap_kv,
             flash_attention,
+            kv_quantize,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
@@ -392,6 +401,11 @@ fn main() -> Result<()> {
             // Flash attention
             if flash_attention {
                 println!("⚡ Flash attention enabled (memory-efficient O(1) attention)");
+            }
+
+            // KV cache quantization
+            if kv_quantize {
+                println!("🔢 INT8 KV cache quantization enabled (4x memory reduction)");
             }
 
             // Prompt caching
@@ -521,6 +535,7 @@ fn main() -> Result<()> {
             sink_tokens: _,
             mmap_kv: _,
             flash_attention: _,
+            kv_quantize: _,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             let tp_shards = if tensor_parallel > 0 {
@@ -613,6 +628,7 @@ fn main() -> Result<()> {
                         println!("Memory budget: {}", cfg.model.memory_budget);
                         println!("Server: {}:{}", cfg.server.host, cfg.server.port);
                         println!("Flash attention: {}", cfg.inference.flash_attention);
+                        println!("KV quantization: {}", cfg.inference.kv_quantize);
                         println!("Sliding window: {}", cfg.inference.sliding_window);
                         println!("Model directory: {}", cfg.paths.model_dir.display());
                     }

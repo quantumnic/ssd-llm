@@ -45,6 +45,7 @@ pub struct InferenceConfig {
     pub sink_tokens: usize,
     pub mmap_kv: bool,
     pub flash_attention: bool,
+    pub kv_quantize: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +79,7 @@ impl Default for Config {
                 sink_tokens: 4,
                 mmap_kv: false,
                 flash_attention: false,
+                kv_quantize: false,
             },
             paths: PathsConfig {
                 model_dir: PathBuf::from("models"),
@@ -162,6 +164,9 @@ impl Config {
                 "inference.prompt_cache" => {
                     config.inference.prompt_cache = value == "true";
                 }
+                "inference.kv_quantize" => {
+                    config.inference.kv_quantize = value == "true";
+                }
                 "paths.model_dir" => config.paths.model_dir = PathBuf::from(value),
                 _ => {} // ignore unknown keys
             }
@@ -193,6 +198,7 @@ flash_attention = false
 sliding_window = 0
 mmap_kv = false
 prompt_cache = false
+kv_quantize = false
 
 [paths]
 model_dir = "models"
