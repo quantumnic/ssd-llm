@@ -1,4 +1,4 @@
-//! Token sampling strategies: Temperature, Top-K, Top-P (nucleus)
+//! Token sampling strategies: Temperature, Top-K, Top-P (nucleus), Min-P
 
 use std::cell::Cell;
 
@@ -6,6 +6,7 @@ pub struct Sampler {
     temperature: f32,
     top_k: usize,
     top_p: f32,
+    min_p: f32,
     repetition_penalty: f32,
     frequency_penalty: f32,
     presence_penalty: f32,
@@ -23,6 +24,7 @@ impl Sampler {
             temperature,
             top_k,
             top_p,
+            min_p: 0.0,
             repetition_penalty: 1.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -48,6 +50,41 @@ impl Sampler {
             temperature,
             top_k,
             top_p,
+            min_p: 0.0,
+            repetition_penalty: repetition_penalty.max(0.01),
+            frequency_penalty,
+            presence_penalty,
+            rng_state: Cell::new(seed ^ 0x517cc1b727220a95),
+        }
+    }
+
+    /// Create a sampler with all parameters including Min-P
+    ///
+    /// Min-P filtering keeps only tokens whose probability is at least `min_p` times
+    /// the probability of the most likely token. This provides adaptive filtering that
+    /// scales with model confidence — when the model is sure, fewer tokens pass;
+    /// when uncertain, more diversity is allowed.
+    ///
+    /// Typical values: 0.05–0.1 for creative text, 0.1–0.2 for focused output.
+    pub fn with_min_p(
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        repetition_penalty: f32,
+        frequency_penalty: f32,
+        presence_penalty: f32,
+    ) -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        Self {
+            temperature,
+            top_k,
+            top_p,
+            min_p: min_p.clamp(0.0, 1.0),
             repetition_penalty: repetition_penalty.max(0.01),
             frequency_penalty,
             presence_penalty,
@@ -114,6 +151,43 @@ impl Sampler {
 
         let k = self.top_k.min(indexed.len());
         let candidates: Vec<(usize, f32)> = indexed[..k].to_vec();
+
+        // Min-P filtering: keep tokens with prob >= min_p * max_prob
+        // Applied after top-k but before softmax, using pre-softmax logits
+        let candidates = if self.min_p > 0.0 && !candidates.is_empty() {
+            // Compute softmax over candidates to get probabilities for Min-P check
+            let max_logit = candidates
+                .iter()
+                .map(|(_, v)| *v)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let probs: Vec<(usize, f32)> = candidates
+                .iter()
+                .map(|(idx, v)| (*idx, (v - max_logit).exp()))
+                .collect();
+            let sum: f32 = probs.iter().map(|(_, p)| p).sum();
+            let probs: Vec<(usize, f32)> = probs
+                .into_iter()
+                .map(|(idx, p)| (idx, if sum > 0.0 { p / sum } else { p }))
+                .collect();
+
+            let max_prob = probs.iter().map(|(_, p)| *p).fold(0.0f32, f32::max);
+            let threshold = self.min_p * max_prob;
+
+            let filtered: Vec<(usize, f32)> = candidates
+                .iter()
+                .zip(probs.iter())
+                .filter(|(_, (_, p))| *p >= threshold)
+                .map(|(c, _)| *c)
+                .collect();
+
+            if filtered.is_empty() {
+                vec![candidates[0]] // keep at least the top token
+            } else {
+                filtered
+            }
+        } else {
+            candidates
+        };
 
         // Softmax over candidates
         let max_val = candidates
@@ -236,6 +310,27 @@ mod tests {
         assert!((logits[2] - 2.0).abs() < 1e-5);
         // Token 0 unchanged
         assert!((logits[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_min_p_filters_low_probability() {
+        // With min_p=0.5, only tokens with prob >= 50% of max prob should survive
+        let sampler = Sampler::with_min_p(0.0, 40, 0.9, 0.5, 1.0, 0.0, 0.0);
+        // Token 3 has highest logit (greedy), min_p should not affect greedy
+        let logits = vec![0.1, 0.5, 0.3, 5.0, 0.2];
+        assert_eq!(sampler.sample(&logits), 3);
+    }
+
+    #[test]
+    fn test_min_p_zero_has_no_effect() {
+        // With min_p=0, sampling should work the same as without
+        let sampler_no_minp = Sampler::new(0.0, 40, 0.9);
+        let sampler_minp_zero = Sampler::with_min_p(0.0, 40, 0.9, 0.0, 1.0, 0.0, 0.0);
+        let logits = vec![0.1, 0.5, 0.3, 0.9, 0.2];
+        assert_eq!(
+            sampler_no_minp.sample(&logits),
+            sampler_minp_zero.sample(&logits)
+        );
     }
 
     #[test]

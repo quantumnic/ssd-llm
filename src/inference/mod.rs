@@ -8,6 +8,7 @@ pub mod kv_cache;
 pub mod mmap_kv_cache;
 pub mod prompt_cache;
 pub mod quantized_kv_cache;
+pub mod rope_scaling;
 pub mod sampler;
 pub mod sliding_window;
 pub mod speculative;

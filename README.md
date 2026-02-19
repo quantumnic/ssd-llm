@@ -61,6 +61,8 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🔁 Repetition Penalties** — Repetition, frequency, and presence penalties to reduce repetitive output
 - **🔢 K-Quant Support** — GPU-accelerated Q4_K and Q6_K dequantization via Metal shaders, plus CPU fallback for all K-quant types
 - **🗜️ KV Cache Quantization** — INT8 per-row quantized KV cache for 4x memory reduction, enabling much longer context windows
+- **📐 RoPE Scaling** — Linear, NTK-aware, and YaRN scaling methods for extended context windows beyond training length
+- **🎲 Min-P Sampling** — Adaptive probability filtering that scales with model confidence for better quality/diversity trade-off
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
