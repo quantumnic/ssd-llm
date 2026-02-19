@@ -514,6 +514,90 @@ impl<'a> StreamingGenerator<'a> {
     }
 }
 
+/// Compute embeddings for input text.
+///
+/// Runs the full forward pass through all transformer layers, then applies
+/// final RMS norm. Returns the last-token hidden state as the embedding vector,
+/// optionally L2-normalized.
+pub fn embed(
+    gguf: &GgufFile,
+    streamer: &SsdStreamer,
+    layer_cache: &mut LayerCache,
+    text: &str,
+    normalize: bool,
+) -> Result<EmbeddingResult> {
+    let n_embd = gguf.n_embd() as usize;
+    let n_layers = gguf.n_layers();
+    let n_head = gguf.n_head() as usize;
+    let n_head_kv = gguf.n_head_kv() as usize;
+    let head_dim = n_embd / n_head;
+    let n_ctx = gguf.n_ctx() as usize;
+
+    if n_embd == 0 || n_layers == 0 {
+        bail!("Invalid model: n_embd={}, n_layers={}", n_embd, n_layers);
+    }
+
+    let prefetcher = Prefetcher::new(PrefetchStrategy::LookAhead(2));
+    let tokenizer = SimpleTokenizer::from_gguf(gguf);
+    let tokens = tokenizer.encode(text);
+    let prompt_tokens = tokens.len();
+
+    let mut kv_cache = KvCache::new(n_layers as usize, n_head_kv, head_dim, n_ctx);
+
+    // Batch prefill
+    let embeddings_data = streamer
+        .load_named_tensor_f32(gguf, "token_embd.weight")
+        .ok();
+    let mut token_embeddings: Vec<Vec<f32>> = Vec::with_capacity(tokens.len());
+    for &token_id in &tokens {
+        let mut emb = vec![0.0f32; n_embd];
+        if let Some(ref emb_data) = embeddings_data {
+            let s = token_id as usize * n_embd;
+            let e = s + n_embd;
+            if e <= emb_data.len() {
+                emb = emb_data[s..e].to_vec();
+            }
+        }
+        token_embeddings.push(emb);
+    }
+
+    let mut hidden_state = batch_prefill(
+        gguf,
+        streamer,
+        layer_cache,
+        &mut kv_cache,
+        &token_embeddings,
+        0,
+        &prefetcher,
+    )?;
+
+    // Apply final RMS norm
+    if let Ok(norm_w) = streamer.load_named_tensor_f32(gguf, "output_norm.weight") {
+        rms_norm(&mut hidden_state, &norm_w);
+    }
+
+    // Optionally L2-normalize
+    if normalize {
+        let norm = hidden_state.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 1e-12 {
+            for x in &mut hidden_state {
+                *x /= norm;
+            }
+        }
+    }
+
+    Ok(EmbeddingResult {
+        embedding: hidden_state,
+        prompt_tokens,
+    })
+}
+
+/// Result of embedding extraction
+pub struct EmbeddingResult {
+    pub embedding: Vec<f32>,
+    pub prompt_tokens: usize,
+}
+
 /// Create a streaming generator that yields tokens one at a time
 pub fn generate_streaming<'a>(
     gguf: &'a GgufFile,

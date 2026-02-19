@@ -60,7 +60,9 @@ impl ApiServer {
         let listener = TcpListener::bind(&addr)?;
         info!("ssd-llm API server listening on http://{}", addr);
         info!("Ollama-compatible API: POST /api/generate, POST /api/chat, GET /api/tags");
-        info!("OpenAI-compatible API: POST /v1/chat/completions");
+        info!(
+            "OpenAI-compatible API: POST /v1/chat/completions, POST /v1/embeddings, GET /v1/models"
+        );
         info!("Streaming: supported (default for generate/chat)");
 
         // Load model
@@ -192,13 +194,15 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("POST", "/api/generate") => handle_generate(&mut stream, ctx, &body_str),
         ("POST", "/api/chat") => handle_chat(&mut stream, ctx, &body_str),
         ("POST", "/v1/chat/completions") => handle_openai_chat(&mut stream, ctx, &body_str),
+        ("POST", "/v1/embeddings") => handle_embeddings(&mut stream, ctx, &body_str),
+        ("GET", "/v1/models") => handle_openai_models(&mut stream, ctx),
         ("GET", "/health") => handle_health(&mut stream, ctx),
         ("GET", "/metrics") => handle_metrics(&mut stream, ctx),
         ("OPTIONS", _) => handle_cors_preflight(&mut stream),
         ("GET", "/") => send_json_response(
             &mut stream,
             200,
-            r#"{"status":"ssd-llm is running","version":"1.0.0"}"#,
+            r#"{"status":"ssd-llm is running","version":"1.1.0"}"#,
         ),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
@@ -229,7 +233,7 @@ fn handle_cors_preflight(stream: &mut TcpStream) -> Result<()> {
 }
 
 fn handle_version(stream: &mut TcpStream) -> Result<()> {
-    send_json_response(stream, 200, r#"{"version":"1.0.0-ssd-llm"}"#)
+    send_json_response(stream, 200, r#"{"version":"1.1.0-ssd-llm"}"#)
 }
 
 fn handle_health(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
@@ -559,6 +563,161 @@ fn handle_openai_streaming(
             write!(stream, "data: {}\n\n", err)?;
             Ok(())
         }
+    }
+}
+
+fn handle_embeddings(
+    stream: &mut TcpStream,
+    ctx: &Arc<Mutex<ModelContext>>,
+    body: &str,
+) -> Result<()> {
+    // Support both "input": "string" and "input": ["string", ...]
+    let inputs = extract_embedding_inputs(body);
+    if inputs.is_empty() {
+        return send_json_response(
+            stream,
+            400,
+            r#"{"error":{"message":"'input' is required","type":"invalid_request_error"}}"#,
+        );
+    }
+
+    let mut ctx = ctx.lock().unwrap();
+    let ModelContext {
+        ref gguf,
+        ref streamer,
+        ref mut cache,
+        ref model_name,
+        ..
+    } = *ctx;
+
+    let mut data_entries = Vec::new();
+    let mut total_tokens = 0usize;
+
+    for (idx, input) in inputs.iter().enumerate() {
+        match transformer::embed(gguf, streamer, cache, input, true) {
+            Ok(result) => {
+                total_tokens += result.prompt_tokens;
+                // Format embedding array as JSON
+                let emb_json: Vec<String> = result
+                    .embedding
+                    .iter()
+                    .map(|v| format!("{:.8}", v))
+                    .collect();
+                data_entries.push(format!(
+                    r#"{{"object":"embedding","embedding":[{}],"index":{}}}"#,
+                    emb_json.join(","),
+                    idx
+                ));
+            }
+            Err(e) => {
+                let resp = format!(
+                    r#"{{"error":{{"message":"{}","type":"server_error"}}}}"#,
+                    escape_json(&e.to_string())
+                );
+                return send_json_response(stream, 500, &resp);
+            }
+        }
+    }
+
+    let resp = format!(
+        r#"{{"object":"list","data":[{}],"model":"{}","usage":{{"prompt_tokens":{},"total_tokens":{}}}}}"#,
+        data_entries.join(","),
+        model_name,
+        total_tokens,
+        total_tokens,
+    );
+    send_json_response(stream, 200, &resp)
+}
+
+fn handle_openai_models(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
+    let ctx = ctx.lock().unwrap();
+    let resp = format!(
+        r#"{{"object":"list","data":[{{"id":"{}","object":"model","created":{},"owned_by":"ssd-llm"}}]}}"#,
+        ctx.model_name,
+        unix_timestamp(),
+    );
+    send_json_response(stream, 200, &resp)
+}
+
+/// Extract embedding inputs — supports "input": "text" and "input": ["text1", "text2"]
+fn extract_embedding_inputs(json: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    if let Some(pos) = json.find(r#""input""#) {
+        let after = &json[pos + 7..];
+        let after = after.trim_start();
+        if let Some(after) = after.strip_prefix(':') {
+            let after = after.trim_start();
+            if after.starts_with('[') {
+                // Array of strings
+                if let Some(end) = after.find(']') {
+                    let arr = &after[1..end];
+                    let mut in_string = false;
+                    let mut current = String::new();
+                    let mut escaped = false;
+                    for ch in arr.chars() {
+                        if escaped {
+                            current.push(ch);
+                            escaped = false;
+                            continue;
+                        }
+                        match ch {
+                            '\\' if in_string => {
+                                escaped = true;
+                                current.push(ch);
+                            }
+                            '"' => {
+                                if in_string {
+                                    results.push(current.clone());
+                                    current.clear();
+                                }
+                                in_string = !in_string;
+                            }
+                            _ if in_string => current.push(ch),
+                            _ => {}
+                        }
+                    }
+                }
+            } else if let Some(inner) = after.strip_prefix('"') {
+                // Single string
+                if let Some(end) = inner.find('"') {
+                    results.push(inner[..end].to_string());
+                }
+            }
+        }
+    }
+    results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_embedding_inputs_single_string() {
+        let json = r#"{"input": "hello world", "model": "test"}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_array() {
+        let json = r#"{"input": ["hello", "world"], "model": "test"}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_empty() {
+        let json = r#"{"model": "test"}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert!(inputs.is_empty());
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_single_in_array() {
+        let json = r#"{"input": ["only one"]}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs, vec!["only one"]);
     }
 }
 

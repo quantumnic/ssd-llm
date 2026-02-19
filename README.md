@@ -54,6 +54,8 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **⚙️ Configuration File** — TOML config file support for persistent settings
 - **🛑 Graceful Shutdown** — Signal handling (SIGINT/SIGTERM) for clean server shutdown
 - **🔧 CORS Support** — Full CORS preflight handling for browser-based clients
+- **🧮 Embeddings API** — OpenAI-compatible `/v1/embeddings` endpoint with L2-normalized vectors for RAG pipelines
+- **📋 Models Listing** — OpenAI-compatible `/v1/models` endpoint for client discovery
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
@@ -289,6 +291,7 @@ This project builds on insights from:
 - [x] v0.8 — Sliding window attention, GQA optimization, memory-mapped KV cache
 - [x] v0.9 — Structured benchmark suite, flash attention, health/metrics API
 - [x] v1.0 — Production-ready: model downloader, config files, graceful shutdown, criterion benchmarks, CORS, clippy-clean
+- [x] v1.1 — OpenAI embeddings API (`/v1/embeddings`), models listing (`/v1/models`), L2-normalized embedding extraction
 
 ## Requirements
 

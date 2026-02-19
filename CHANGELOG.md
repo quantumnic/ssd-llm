@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.0 — Embeddings & Models API (2026-02-19)
+
+### Added
+- **OpenAI Embeddings API** (`POST /v1/embeddings`) — compute L2-normalized embedding vectors from input text, supporting both single string and array inputs, fully compatible with OpenAI client libraries
+- **Models Listing** (`GET /v1/models`) — OpenAI-compatible endpoint for model discovery
+- **`transformer::embed()`** — dedicated embedding extraction function with optional L2 normalization, using batch prefill + final RMS norm
+- **4 new tests** for embedding input parsing (single string, array, empty, single-in-array)
+
 ## v1.0.0 — Production-Ready Release (2026-02-19)
 
 ### Added
