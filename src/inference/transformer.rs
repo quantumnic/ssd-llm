@@ -18,6 +18,10 @@ pub struct InferenceConfig {
     pub top_k: usize,
     pub top_p: f32,
     pub max_tokens: usize,
+    pub stop_sequences: Vec<String>,
+    pub repetition_penalty: f32,
+    pub frequency_penalty: f32,
+    pub presence_penalty: f32,
 }
 
 pub struct GenerationResult {

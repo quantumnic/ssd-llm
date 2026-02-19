@@ -268,6 +268,10 @@ fn handle_generate(
         top_k,
         top_p,
         max_tokens,
+        stop_sequences: Vec::new(),
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
     };
 
     if streaming {
@@ -375,6 +379,10 @@ fn handle_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &st
         top_k: extract_json_number(body, "top_k").unwrap_or(40) as usize,
         top_p: extract_json_float(body, "top_p").unwrap_or(0.9),
         max_tokens: extract_json_number(body, "num_predict").unwrap_or(128) as usize,
+        stop_sequences: extract_json_string_array(body, "stop").unwrap_or_default(),
+        repetition_penalty: extract_json_float(body, "repeat_penalty").unwrap_or(1.0),
+        frequency_penalty: extract_json_float(body, "frequency_penalty").unwrap_or(0.0),
+        presence_penalty: extract_json_float(body, "presence_penalty").unwrap_or(0.0),
     };
 
     if streaming {
@@ -473,7 +481,27 @@ fn handle_openai_chat(
     ctx: &Arc<Mutex<ModelContext>>,
     body: &str,
 ) -> Result<()> {
-    let prompt = extract_last_message_content(body).unwrap_or_default();
+    use crate::inference::chat_template::{format_chat, ChatTemplateFormat};
+
+    // Parse all messages and format with appropriate chat template
+    let messages = extract_chat_messages(body);
+    let prompt = if messages.is_empty() {
+        extract_last_message_content(body).unwrap_or_default()
+    } else {
+        // Detect template from model name
+        let model_name = {
+            let ctx = ctx.lock().unwrap();
+            ctx.model_name.clone()
+        };
+        let template_name = extract_json_string(body, "chat_template");
+        let format = if let Some(ref tmpl) = template_name {
+            ChatTemplateFormat::from_gguf_template(tmpl)
+        } else {
+            ChatTemplateFormat::from_model_name(&model_name)
+        };
+        format_chat(&messages, format)
+    };
+
     let max_tokens = extract_json_number(body, "max_tokens").unwrap_or(128) as usize;
     let temperature = extract_json_float(body, "temperature").unwrap_or(0.7);
     let streaming = extract_json_bool(body, "stream").unwrap_or(false);
@@ -483,6 +511,10 @@ fn handle_openai_chat(
         top_k: 40,
         top_p: extract_json_float(body, "top_p").unwrap_or(0.9),
         max_tokens,
+        stop_sequences: extract_json_string_array(body, "stop").unwrap_or_default(),
+        repetition_penalty: 1.0,
+        frequency_penalty: extract_json_float(body, "frequency_penalty").unwrap_or(0.0),
+        presence_penalty: extract_json_float(body, "presence_penalty").unwrap_or(0.0),
     };
 
     if streaming {
@@ -501,12 +533,13 @@ fn handle_openai_chat(
     match transformer::generate(gguf, streamer, cache, &prompt, &config) {
         Ok(result) => {
             let resp = format!(
-                r#"{{"id":"chatcmpl-ssd","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":0,"completion_tokens":{},"total_tokens":{}}}}}"#,
+                r#"{{"id":"chatcmpl-ssd","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
                 unix_timestamp(),
                 model_name,
                 escape_json(&result.text),
+                result.prompt_tokens,
                 result.token_count,
-                result.token_count,
+                result.prompt_tokens + result.token_count,
             );
             send_json_response(stream, 200, &resp)
         }
@@ -844,4 +877,91 @@ fn extract_last_message_content(json: &str) -> Option<String> {
         search_from = abs_pos + 9;
     }
     last_content
+}
+
+/// Extract an array of strings from JSON, e.g. "stop": ["foo", "bar"]
+fn extract_json_string_array(json: &str, key: &str) -> Option<Vec<String>> {
+    let pattern = format!(r#""{}""#, key);
+    let pos = json.find(&pattern)?;
+    let after = &json[pos + pattern.len()..];
+    let after = after.trim_start().strip_prefix(':')?;
+    let after = after.trim_start();
+
+    // Handle single string value
+    if after.starts_with('"') {
+        let inner = after.strip_prefix('"')?;
+        let end = inner.find('"')?;
+        return Some(vec![inner[..end].to_string()]);
+    }
+
+    // Handle array
+    if !after.starts_with('[') {
+        return None;
+    }
+    let bracket_end = after.find(']')?;
+    let array_content = &after[1..bracket_end];
+
+    let mut result = Vec::new();
+    let mut search = array_content;
+    while let Some(start) = search.find('"') {
+        let inner = &search[start + 1..];
+        if let Some(end) = inner.find('"') {
+            result.push(inner[..end].to_string());
+            search = &inner[end + 1..];
+        } else {
+            break;
+        }
+    }
+    Some(result)
+}
+
+/// Extract all chat messages (role + content pairs) from an OpenAI messages array
+fn extract_chat_messages(json: &str) -> Vec<crate::api::openai::ChatMessage> {
+    use crate::api::openai::{ChatMessage, Role};
+
+    let mut messages = Vec::new();
+
+    // Find "messages" array
+    let Some(msgs_pos) = json.find(r#""messages""#) else {
+        return messages;
+    };
+    let after = &json[msgs_pos + 10..];
+    let Some(arr_start) = after.find('[') else {
+        return messages;
+    };
+    let arr_content = &after[arr_start..];
+
+    // Find each message object by looking for "role" keys
+    let mut search_from = 0;
+    while let Some(role_pos) = arr_content[search_from..].find(r#""role""#) {
+        let abs_pos = search_from + role_pos;
+        let role_after = &arr_content[abs_pos + 6..];
+        let role_str = role_after
+            .trim_start()
+            .strip_prefix(':')
+            .and_then(|s| s.trim_start().strip_prefix('"'))
+            .and_then(|s| s.find('"').map(|end| &s[..end]));
+
+        // Find matching "content" after this "role"
+        let content_after = &arr_content[abs_pos..];
+        let content_str = content_after.find(r#""content""#).and_then(|cp| {
+            let ca = &content_after[cp + 9..];
+            ca.trim_start().strip_prefix(':').and_then(|s| {
+                let s = s.trim_start();
+                s.strip_prefix('"')
+                    .and_then(|s| s.find('"').map(|end| &s[..end]))
+            })
+        });
+
+        if let (Some(role), Some(content)) = (role_str, content_str) {
+            messages.push(ChatMessage {
+                role: Role::from_str(role),
+                content: content.to_string(),
+            });
+        }
+
+        search_from = abs_pos + 6;
+    }
+
+    messages
 }

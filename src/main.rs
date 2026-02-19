@@ -338,6 +338,10 @@ fn main() -> Result<()> {
                 top_k,
                 top_p,
                 max_tokens,
+                stop_sequences: Vec::new(),
+                repetition_penalty: 1.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
             };
 
             // Tensor parallelism

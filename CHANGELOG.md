@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.2.0 — Chat Templates, Stop Sequences & Sampling Penalties (2026-02-19)
+
+### Added
+- **Chat template system** (`inference/chat_template.rs`) — auto-detected formatting for multi-turn conversations:
+  - **ChatML** (Qwen, Yi, OpenHermes, default fallback)
+  - **Llama 2** (`<<SYS>>` / `[INST]` format)
+  - **Llama 3** (`<|start_header_id|>` format)
+  - **Mistral/Mixtral** (`[INST]` without system token)
+  - **Gemma** (`<start_of_turn>` format)
+  - **Phi-3** (`<|user|>` format)
+  - **Raw** (plain concatenation)
+  - Auto-detection from GGUF metadata template string or model name
+  - Per-template stop sequences for proper generation termination
+  - `chat_template` parameter in OpenAI API for explicit override
+  - 13 new tests for all template formats, detection, and multi-turn conversations
+- **Stop sequences** — `stop` parameter in both Ollama and OpenAI API endpoints for early generation termination
+- **Repetition penalty** — multiplicative penalty on previously generated tokens (divides positive logits, multiplies negative)
+- **Frequency penalty** — additive penalty scaling with token occurrence count
+- **Presence penalty** — additive binary penalty for any previously seen token
+- **`Sampler::with_penalties()`** — constructor with full penalty configuration
+- **`Sampler::apply_penalties()`** — apply all penalty types to logits given previous token history
+- **Proper message parsing** in OpenAI chat endpoint — full multi-message extraction with role/content pairs
+- **Proper token usage tracking** — `prompt_tokens` now correctly reported in OpenAI API responses
+- **`extract_json_string_array()`** — JSON array parser for stop sequences (supports both `"stop": "text"` and `"stop": ["a", "b"]`)
+- **`extract_chat_messages()`** — full OpenAI messages array parser
+- 4 new sampler tests (repetition, frequency, presence penalty, no-op)
+- 17 new tests total (107 → from 87 baseline)
+
+### Changed
+- `InferenceConfig` extended with `stop_sequences`, `repetition_penalty`, `frequency_penalty`, `presence_penalty`
+- OpenAI `/v1/chat/completions` now properly parses all messages and applies chat template (was: only last message content)
+- OpenAI API responses now include accurate `prompt_tokens` count (was: hardcoded 0)
+
 ## v1.1.0 — Embeddings & Models API (2026-02-19)
 
 ### Added

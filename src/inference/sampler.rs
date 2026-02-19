@@ -6,6 +6,9 @@ pub struct Sampler {
     temperature: f32,
     top_k: usize,
     top_p: f32,
+    repetition_penalty: f32,
+    frequency_penalty: f32,
+    presence_penalty: f32,
     rng_state: Cell<u64>,
 }
 
@@ -20,7 +23,73 @@ impl Sampler {
             temperature,
             top_k,
             top_p,
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
             rng_state: Cell::new(seed ^ 0x517cc1b727220a95),
+        }
+    }
+
+    /// Create a sampler with repetition penalty parameters
+    pub fn with_penalties(
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        repetition_penalty: f32,
+        frequency_penalty: f32,
+        presence_penalty: f32,
+    ) -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        Self {
+            temperature,
+            top_k,
+            top_p,
+            repetition_penalty: repetition_penalty.max(0.01),
+            frequency_penalty,
+            presence_penalty,
+            rng_state: Cell::new(seed ^ 0x517cc1b727220a95),
+        }
+    }
+
+    /// Apply repetition, frequency, and presence penalties to logits based on prior tokens
+    pub fn apply_penalties(&self, logits: &mut [f32], previous_tokens: &[u32]) {
+        if (self.repetition_penalty - 1.0).abs() < 1e-6
+            && self.frequency_penalty.abs() < 1e-6
+            && self.presence_penalty.abs() < 1e-6
+        {
+            return;
+        }
+
+        // Count token frequencies
+        let mut freq: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for &tok in previous_tokens {
+            *freq.entry(tok).or_insert(0) += 1;
+        }
+
+        for (&tok, &count) in &freq {
+            let idx = tok as usize;
+            if idx >= logits.len() {
+                continue;
+            }
+
+            // Repetition penalty (multiplicative): divide positive logits, multiply negative
+            if self.repetition_penalty != 1.0 {
+                if logits[idx] > 0.0 {
+                    logits[idx] /= self.repetition_penalty;
+                } else {
+                    logits[idx] *= self.repetition_penalty;
+                }
+            }
+
+            // Frequency penalty (additive, scales with count)
+            logits[idx] -= self.frequency_penalty * count as f32;
+
+            // Presence penalty (additive, binary)
+            logits[idx] -= self.presence_penalty;
         }
     }
 
@@ -132,5 +201,49 @@ mod tests {
         let a = sampler.random_f32();
         let b = sampler.random_f32();
         assert_ne!(a, b, "RNG should produce different values");
+    }
+
+    #[test]
+    fn test_repetition_penalty() {
+        let sampler = Sampler::with_penalties(0.0, 40, 0.9, 2.0, 0.0, 0.0);
+        // Token 3 has highest logit but was seen before — penalty should reduce it
+        let mut logits = vec![0.1, 0.5, 0.3, 0.9, 0.2];
+        sampler.apply_penalties(&mut logits, &[3]);
+        // Positive logit divided by 2.0: 0.9 -> 0.45
+        assert!((logits[3] - 0.45).abs() < 1e-5);
+        // Unmentioned tokens unchanged
+        assert!((logits[0] - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_frequency_penalty() {
+        let sampler = Sampler::with_penalties(0.0, 40, 0.9, 1.0, 0.5, 0.0);
+        let mut logits = vec![1.0, 2.0, 3.0];
+        // Token 2 appeared 3 times
+        sampler.apply_penalties(&mut logits, &[2, 2, 2]);
+        // 3.0 - 0.5*3 = 1.5
+        assert!((logits[2] - 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_presence_penalty() {
+        let sampler = Sampler::with_penalties(0.0, 40, 0.9, 1.0, 0.0, 1.0);
+        let mut logits = vec![1.0, 2.0, 3.0];
+        sampler.apply_penalties(&mut logits, &[1, 2, 2]);
+        // Token 1: 2.0 - 1.0 = 1.0
+        assert!((logits[1] - 1.0).abs() < 1e-5);
+        // Token 2: 3.0 - 1.0 = 2.0 (presence is binary, not scaled by count)
+        assert!((logits[2] - 2.0).abs() < 1e-5);
+        // Token 0 unchanged
+        assert!((logits[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_no_penalties_noop() {
+        let sampler = Sampler::with_penalties(1.0, 40, 0.9, 1.0, 0.0, 0.0);
+        let mut logits = vec![1.0, 2.0, 3.0];
+        let original = logits.clone();
+        sampler.apply_penalties(&mut logits, &[0, 1, 2]);
+        assert_eq!(logits, original);
     }
 }

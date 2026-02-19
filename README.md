@@ -56,6 +56,9 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🔧 CORS Support** — Full CORS preflight handling for browser-based clients
 - **🧮 Embeddings API** — OpenAI-compatible `/v1/embeddings` endpoint with L2-normalized vectors for RAG pipelines
 - **📋 Models Listing** — OpenAI-compatible `/v1/models` endpoint for client discovery
+- **🎭 Chat Templates** — Auto-detected formatting for Llama 2, Llama 3, Mistral, Gemma, Phi-3, ChatML, and raw mode
+- **🛑 Stop Sequences** — Early generation termination on configurable stop strings
+- **🔁 Repetition Penalties** — Repetition, frequency, and presence penalties to reduce repetitive output
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
@@ -292,6 +295,7 @@ This project builds on insights from:
 - [x] v0.9 — Structured benchmark suite, flash attention, health/metrics API
 - [x] v1.0 — Production-ready: model downloader, config files, graceful shutdown, criterion benchmarks, CORS, clippy-clean
 - [x] v1.1 — OpenAI embeddings API (`/v1/embeddings`), models listing (`/v1/models`), L2-normalized embedding extraction
+- [x] v1.2 — Chat templates (Llama 2/3, Mistral, Gemma, Phi-3, ChatML), stop sequences, repetition/frequency/presence penalties, proper token usage tracking
 
 ## Requirements
 
