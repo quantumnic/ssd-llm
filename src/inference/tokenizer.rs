@@ -371,7 +371,7 @@ mod tests {
     use super::*;
 
     fn make_test_tokenizer() -> SimpleTokenizer {
-        let mut id_to_token = vec![
+        let id_to_token = vec![
             "<unk>".to_string(),
             "<s>".to_string(),
             "</s>".to_string(),

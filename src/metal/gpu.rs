@@ -29,6 +29,8 @@ pub struct MetalGpu {
 struct GpuPipelines {
     matvec_f32: ComputePipelineState,
     matvec_q4_0: ComputePipelineState,
+    matvec_q4_k: ComputePipelineState,
+    matvec_q6_k: ComputePipelineState,
     matvec_q8_0: ComputePipelineState,
     rmsnorm_sumsq: ComputePipelineState,
     rmsnorm_normalize: ComputePipelineState,
@@ -90,6 +92,8 @@ impl MetalGpu {
         Some(GpuPipelines {
             matvec_f32: make_pipeline("matvec_f32")?,
             matvec_q4_0: make_pipeline("matvec_q4_0")?,
+            matvec_q4_k: make_pipeline("matvec_q4_k")?,
+            matvec_q6_k: make_pipeline("matvec_q6_k")?,
             matvec_q8_0: make_pipeline("matvec_q8_0")?,
             rmsnorm_sumsq: make_pipeline("rmsnorm_sumsq")?,
             rmsnorm_normalize: make_pipeline("rmsnorm_normalize")?,
@@ -332,6 +336,77 @@ impl MetalGpu {
 
         let result = self.read_buffer::<f32>(&x_buf, n);
         x.copy_from_slice(&result);
+    }
+
+    /// GPU quantized matvec dispatch for Q4_0
+    #[cfg(target_os = "macos")]
+    pub fn matvec_q4_0(&self, w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+        self.dispatch_quantized_matvec(&self.pipelines.matvec_q4_0, w, x, out_dim, in_dim)
+    }
+
+    /// GPU quantized matvec dispatch for Q4_K
+    #[cfg(target_os = "macos")]
+    pub fn matvec_q4_k(&self, w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+        self.dispatch_quantized_matvec(&self.pipelines.matvec_q4_k, w, x, out_dim, in_dim)
+    }
+
+    /// GPU quantized matvec dispatch for Q6_K
+    #[cfg(target_os = "macos")]
+    pub fn matvec_q6_k(&self, w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+        self.dispatch_quantized_matvec(&self.pipelines.matvec_q6_k, w, x, out_dim, in_dim)
+    }
+
+    /// GPU quantized matvec dispatch for Q8_0
+    #[cfg(target_os = "macos")]
+    pub fn matvec_q8_0(&self, w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+        self.dispatch_quantized_matvec(&self.pipelines.matvec_q8_0, w, x, out_dim, in_dim)
+    }
+
+    /// Generic dispatch for quantized matvec kernels
+    #[cfg(target_os = "macos")]
+    fn dispatch_quantized_matvec(
+        &self,
+        pipeline: &ComputePipelineState,
+        w: &[u8],
+        x: &[f32],
+        out_dim: usize,
+        in_dim: usize,
+    ) -> Vec<f32> {
+        let w_buf = self.device.new_buffer_with_data(
+            w.as_ptr() as *const std::ffi::c_void,
+            w.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let x_buf = self.create_buffer_with_data(x);
+        let y_buf = self.create_buffer::<f32>(out_dim);
+        let out_dim_buf = self.create_buffer_with_data(&[out_dim as u32]);
+        let in_dim_buf = self.create_buffer_with_data(&[in_dim as u32]);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(&w_buf), 0);
+        encoder.set_buffer(1, Some(&x_buf), 0);
+        encoder.set_buffer(2, Some(&y_buf), 0);
+        encoder.set_buffer(3, Some(&out_dim_buf), 0);
+        encoder.set_buffer(4, Some(&in_dim_buf), 0);
+
+        let thread_count = MTLSize::new(out_dim as u64, 1, 1);
+        let threadgroup_size = MTLSize::new(
+            pipeline
+                .max_total_threads_per_threadgroup()
+                .min(out_dim as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(thread_count, threadgroup_size);
+        encoder.end_encoding();
+
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        self.read_buffer::<f32>(&y_buf, out_dim)
     }
 
     // --- Buffer helpers ---

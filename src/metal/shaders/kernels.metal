@@ -201,6 +201,133 @@ kernel void matvec_q4_0(
 }
 
 // ============================================================
+// ============================================================
+// Quantized Q4_K matrix-vector multiply (dequantize on-the-fly)
+// K-quant block (256 elements):
+//   f16 d (2B) + f16 dmin (2B) + 12B scales/mins + 128B nibbles = 144B
+// Super-block: 256 values split into 8 sub-blocks of 32
+// Each sub-block has a 6-bit scale and 6-bit min packed in 12 bytes
+// ============================================================
+kernel void matvec_q4_k(
+    device const uchar* W_quantized  [[buffer(0)]],
+    device const float* x            [[buffer(1)]],
+    device float* y                  [[buffer(2)]],
+    constant uint& out_dim           [[buffer(3)]],
+    constant uint& in_dim            [[buffer(4)]],
+    uint tid                         [[thread_position_in_grid]]
+) {
+    if (tid >= out_dim) return;
+
+    uint block_size = 256;
+    uint block_bytes = 144; // 2+2+12+128
+    uint blocks_per_row = in_dim / block_size;
+    uint row_offset = tid * blocks_per_row * block_bytes;
+
+    float sum = 0.0;
+
+    for (uint b = 0; b < blocks_per_row; b++) {
+        uint boff = row_offset + b * block_bytes;
+
+        // Read super-block scale and min (f16)
+        ushort d_bits = ushort(W_quantized[boff]) | (ushort(W_quantized[boff + 1]) << 8);
+        ushort dmin_bits = ushort(W_quantized[boff + 2]) | (ushort(W_quantized[boff + 3]) << 8);
+        float d = float(as_type<half>(d_bits));
+        float dmin = float(as_type<half>(dmin_bits));
+
+        // 12 bytes of packed scales and mins for 8 sub-blocks
+        // First 4 bytes: low 6 bits of scales (sub-blocks 0-7, packed into nibble-pairs)
+        // Layout: scales[0..3] hold low 6 bits, scales[4..7] hold low 6 bits of mins
+        // scales[8..11] hold high 2 bits
+        device const uchar* sc = W_quantized + boff + 4;
+        device const uchar* qs = W_quantized + boff + 16; // 4+12=16
+
+        uint x_base = b * block_size;
+
+        for (uint sb = 0; sb < 8; sb++) {
+            // Extract 6-bit scale and min for this sub-block
+            uchar sc_low, m_low;
+            if (sb < 4) {
+                sc_low = sc[sb] & 0x3F;
+                m_low  = sc[sb + 4] & 0x3F;
+            } else {
+                sc_low = (sc[sb - 4] >> 6) | ((sc[sb + 4] & 0xF) << 2);
+                m_low  = (sc[sb] >> 6)     | ((sc[sb + 4] >> 4) << 2);
+            }
+
+            float scale = d * float(sc_low);
+            float min_val = dmin * float(m_low);
+
+            // 32 values packed as 16 bytes of nibbles
+            uint qs_off = sb * 16;
+            for (uint j = 0; j < 16; j++) {
+                uchar byte_val = qs[qs_off + j];
+                float v0 = scale * float(byte_val & 0x0F) - min_val;
+                float v1 = scale * float((byte_val >> 4) & 0x0F) - min_val;
+                uint xi = x_base + sb * 32 + j * 2;
+                sum += v0 * x[xi] + v1 * x[xi + 1];
+            }
+        }
+    }
+
+    y[tid] = sum;
+}
+
+// ============================================================
+// Quantized Q6_K matrix-vector multiply (dequantize on-the-fly)
+// K-quant block (256 elements):
+//   128B ql (low 4 bits) + 64B qh (high 2 bits) + 16B scales (int8) + f16 d = 210B
+// ============================================================
+kernel void matvec_q6_k(
+    device const uchar* W_quantized  [[buffer(0)]],
+    device const float* x            [[buffer(1)]],
+    device float* y                  [[buffer(2)]],
+    constant uint& out_dim           [[buffer(3)]],
+    constant uint& in_dim            [[buffer(4)]],
+    uint tid                         [[thread_position_in_grid]]
+) {
+    if (tid >= out_dim) return;
+
+    uint block_size = 256;
+    uint block_bytes = 210; // 128+64+16+2
+    uint blocks_per_row = in_dim / block_size;
+    uint row_offset = tid * blocks_per_row * block_bytes;
+
+    float sum = 0.0;
+
+    for (uint b = 0; b < blocks_per_row; b++) {
+        uint boff = row_offset + b * block_bytes;
+
+        device const uchar* ql = W_quantized + boff;           // 128 bytes: low 4 bits
+        device const uchar* qh = W_quantized + boff + 128;     // 64 bytes: high 2 bits
+        device const char* scales = (device const char*)(W_quantized + boff + 192); // 16 x int8
+        ushort d_bits = ushort(W_quantized[boff + 208]) | (ushort(W_quantized[boff + 209]) << 8);
+        float d = float(as_type<half>(d_bits));
+
+        uint x_base = b * block_size;
+
+        // 16 sub-blocks of 16 values each
+        for (uint sb = 0; sb < 16; sb++) {
+            float sc = d * float(scales[sb]);
+            for (uint j = 0; j < 16; j++) {
+                uint idx = sb * 16 + j;
+                // Low 4 bits from ql (packed as nibble pairs in 128 bytes)
+                uchar ql_byte = ql[idx / 2];
+                uint low4 = (idx & 1) ? ((ql_byte >> 4) & 0x0F) : (ql_byte & 0x0F);
+                // High 2 bits from qh (packed 4 per byte in 64 bytes)
+                uchar qh_byte = qh[idx / 4];
+                uint shift = (idx % 4) * 2;
+                uint high2 = (qh_byte >> shift) & 0x03;
+                // 6-bit value, centered at 32
+                int q = int((high2 << 4) | low4) - 32;
+                sum += sc * float(q) * x[x_base + idx];
+            }
+        }
+    }
+
+    y[tid] = sum;
+}
+
+// ============================================================
 // Quantized Q8_0 matrix-vector multiply (dequantize on-the-fly)
 // Block layout: f16 scale (2 bytes) + 32 x int8
 // ============================================================

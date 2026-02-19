@@ -7,6 +7,7 @@
 //!       and quantized Q4_0/Q8_0 on-GPU dequant+matmul kernels.
 
 use crate::metal::gpu::MetalGpu;
+use crate::model::gguf::GgmlType;
 use tracing::{debug, info, warn};
 
 /// Threshold below which CPU is faster than GPU dispatch overhead
@@ -150,6 +151,32 @@ impl MetalCompute {
         matvec_f32_simd(w, x, out_dim, in_dim)
     }
 
+    /// Quantized matrix-vector multiply with automatic dispatch by type
+    /// Supports Q4_0, Q4_K, Q6_K, Q8_0 on GPU; falls back to CPU for others
+    pub fn matvec_quantized(
+        &self,
+        w_raw: &[u8],
+        x: &[f32],
+        out_dim: usize,
+        in_dim: usize,
+        dtype: GgmlType,
+    ) -> Vec<f32> {
+        #[cfg(target_os = "macos")]
+        if let Some(ref gpu) = self.gpu {
+            if gpu.should_dispatch(out_dim * in_dim) {
+                match dtype {
+                    GgmlType::Q4_0 => return gpu.matvec_q4_0(w_raw, x, out_dim, in_dim),
+                    GgmlType::Q4K => return gpu.matvec_q4_k(w_raw, x, out_dim, in_dim),
+                    GgmlType::Q6K => return gpu.matvec_q6_k(w_raw, x, out_dim, in_dim),
+                    GgmlType::Q8_0 => return gpu.matvec_q8_0(w_raw, x, out_dim, in_dim),
+                    _ => {}
+                }
+            }
+        }
+        // CPU fallback
+        matvec_quantized_cpu(w_raw, x, out_dim, in_dim, dtype)
+    }
+
     pub fn rmsnorm_f32(&self, x: &mut [f32], weight: &[f32], eps: f32) {
         #[cfg(target_os = "macos")]
         if let Some(ref gpu) = self.gpu {
@@ -276,6 +303,170 @@ pub fn silu_f32(x: &mut [f32]) {
     }
 }
 
+/// CPU quantized matvec dispatch by type
+pub fn matvec_quantized_cpu(
+    w_raw: &[u8],
+    x: &[f32],
+    out_dim: usize,
+    in_dim: usize,
+    dtype: GgmlType,
+) -> Vec<f32> {
+    match dtype {
+        GgmlType::Q4_0 => matvec_q4_0_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::Q4K => matvec_q4_k_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::Q6K => matvec_q6_k_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::Q8_0 => matvec_q8_0_cpu(w_raw, x, out_dim, in_dim),
+        _ => {
+            debug!("Unsupported quant type {:?}, returning zeros", dtype);
+            vec![0.0; out_dim]
+        }
+    }
+}
+
+/// CPU Q4_0 dequant matvec
+fn matvec_q4_0_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let block_size = 32usize;
+    let block_bytes = 18usize;
+    let blocks_per_row = in_dim / block_size;
+    let mut y = vec![0.0f32; out_dim];
+
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * blocks_per_row * block_bytes;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_row {
+            let boff = row_off + b * block_bytes;
+            let scale = f16_to_f32(w[boff], w[boff + 1]);
+            let x_base = b * block_size;
+            for j in 0..16 {
+                let byte = w[boff + 2 + j];
+                let lo = (byte & 0x0F) as i32 - 8;
+                let hi = ((byte >> 4) & 0x0F) as i32 - 8;
+                sum += scale * lo as f32 * x[x_base + j * 2];
+                sum += scale * hi as f32 * x[x_base + j * 2 + 1];
+            }
+        }
+        *y_val = sum;
+    }
+    y
+}
+
+/// CPU Q4_K dequant matvec
+fn matvec_q4_k_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let block_size = 256usize;
+    let block_bytes = 144usize;
+    let blocks_per_row = in_dim / block_size;
+    let mut y = vec![0.0f32; out_dim];
+
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * blocks_per_row * block_bytes;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_row {
+            let boff = row_off + b * block_bytes;
+            let d = f16_to_f32(w[boff], w[boff + 1]);
+            let dmin = f16_to_f32(w[boff + 2], w[boff + 3]);
+            let sc = &w[boff + 4..boff + 16];
+            let qs = &w[boff + 16..boff + 144];
+            let x_base = b * block_size;
+
+            for sb in 0..8u8 {
+                let (sc_low, m_low) = if sb < 4 {
+                    (sc[sb as usize] & 0x3F, sc[sb as usize + 4] & 0x3F)
+                } else {
+                    let si = (sb - 4) as usize;
+                    (
+                        (sc[si] >> 6) | ((sc[sb as usize + 4] & 0x0F) << 2),
+                        (sc[sb as usize] >> 6) | ((sc[sb as usize + 4] >> 4) << 2),
+                    )
+                };
+                let scale = d * sc_low as f32;
+                let min_val = dmin * m_low as f32;
+
+                let qs_off = sb as usize * 16;
+                for j in 0..16 {
+                    let byte_val = qs[qs_off + j];
+                    let v0 = scale * (byte_val & 0x0F) as f32 - min_val;
+                    let v1 = scale * ((byte_val >> 4) & 0x0F) as f32 - min_val;
+                    let xi = x_base + sb as usize * 32 + j * 2;
+                    sum += v0 * x[xi] + v1 * x[xi + 1];
+                }
+            }
+        }
+        *y_val = sum;
+    }
+    y
+}
+
+/// CPU Q6_K dequant matvec
+fn matvec_q6_k_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let block_size = 256usize;
+    let block_bytes = 210usize;
+    let blocks_per_row = in_dim / block_size;
+    let mut y = vec![0.0f32; out_dim];
+
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * blocks_per_row * block_bytes;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_row {
+            let boff = row_off + b * block_bytes;
+            let ql = &w[boff..boff + 128];
+            let qh = &w[boff + 128..boff + 192];
+            let scales = &w[boff + 192..boff + 208];
+            let d = f16_to_f32(w[boff + 208], w[boff + 209]);
+            let x_base = b * block_size;
+
+            for (sb, &scale_byte) in scales.iter().enumerate().take(16) {
+                let sc = d * (scale_byte as i8) as f32;
+                for j in 0..16usize {
+                    let idx = sb * 16 + j;
+                    let ql_byte = ql[idx / 2];
+                    let low4 = if idx & 1 != 0 {
+                        (ql_byte >> 4) & 0x0F
+                    } else {
+                        ql_byte & 0x0F
+                    };
+                    let qh_byte = qh[idx / 4];
+                    let shift = (idx % 4) * 2;
+                    let high2 = (qh_byte >> shift) & 0x03;
+                    let q = ((high2 << 4) | low4) as i32 - 32;
+                    sum += sc * q as f32 * x[x_base + idx];
+                }
+            }
+        }
+        *y_val = sum;
+    }
+    y
+}
+
+/// CPU Q8_0 dequant matvec
+fn matvec_q8_0_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let block_size = 32usize;
+    let block_bytes = 34usize;
+    let blocks_per_row = in_dim / block_size;
+    let mut y = vec![0.0f32; out_dim];
+
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * blocks_per_row * block_bytes;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_row {
+            let boff = row_off + b * block_bytes;
+            let scale = f16_to_f32(w[boff], w[boff + 1]);
+            let x_base = b * block_size;
+            for j in 0..32 {
+                let val = w[boff + 2 + j] as i8;
+                sum += scale * val as f32 * x[x_base + j];
+            }
+        }
+        *y_val = sum;
+    }
+    y
+}
+
+/// Convert two bytes (little-endian) to f32 via f16
+#[inline]
+fn f16_to_f32(lo: u8, hi: u8) -> f32 {
+    half::f16::from_bits(lo as u16 | ((hi as u16) << 8)).to_f32()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +524,50 @@ mod tests {
         assert!((x[0] - 0.0).abs() < 1e-6); // silu(0) = 0
         assert!(x[1] > 0.5); // silu(1) ≈ 0.731
         assert!(x[2] < 0.0 && x[2] > -0.5); // silu(-1) ≈ -0.269
+    }
+
+    #[test]
+    fn test_matvec_q4_0_cpu_basic() {
+        // 1 row, 32 elements (1 block)
+        // Block: f16 scale = 1.0, then 16 bytes of nibbles
+        let scale_bits = half::f16::from_f32(1.0).to_bits();
+        let mut block = vec![scale_bits as u8, (scale_bits >> 8) as u8];
+        // All nibbles = 8 (so value = 8-8 = 0), except first byte = 0x19 (lo=9-8=1, hi=1-8=-7... wait)
+        // Simpler: all zero nibbles => val = 0-8 = -8 each
+        // With x = [1.0; 32], sum = scale * sum_of_dequantized * x
+        // Let's use all 0x88 nibbles: lo = 8, hi = 8, dequant = 0
+        for _ in 0..16 {
+            block.push(0x88);
+        }
+        let x = vec![1.0f32; 32];
+        let y = matvec_q4_0_cpu(&block, &x, 1, 32);
+        assert!(
+            (y[0] - 0.0).abs() < 1e-5,
+            "All zeros should give 0, got {}",
+            y[0]
+        );
+    }
+
+    #[test]
+    fn test_matvec_q8_0_cpu_basic() {
+        // 1 row, 32 elements (1 block)
+        let scale_bits = half::f16::from_f32(1.0).to_bits();
+        let mut block = vec![scale_bits as u8, (scale_bits >> 8) as u8];
+        // 32 int8 values, all = 1
+        for _ in 0..32 {
+            block.push(1u8);
+        }
+        let x = vec![1.0f32; 32];
+        let y = matvec_q8_0_cpu(&block, &x, 1, 32);
+        // Each val = 1.0 * 1 = 1.0, dot with x[j]=1.0 => sum = 32.0
+        assert!((y[0] - 32.0).abs() < 1e-3, "Expected 32.0, got {}", y[0]);
+    }
+
+    #[test]
+    fn test_f16_to_f32_roundtrip() {
+        let bits = half::f16::from_f32(3.14).to_bits();
+        let result = f16_to_f32(bits as u8, (bits >> 8) as u8);
+        assert!((result - 3.14).abs() < 0.01);
     }
 
     #[test]
