@@ -68,6 +68,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **💬 Interactive Chat** — `ssd-llm chat` for multi-turn conversations with history, undo, system prompts, and streaming output
 - **📋 JSON Mode** — `response_format: { type: "json_object" }` for guaranteed valid JSON output via grammar-constrained generation
 - **🔗 LoRA Adapters** — Load LoRA adapters from GGUF files at inference time with configurable scaling, support for multiple simultaneous adapters
+- **🛠️ Function Calling / Tool Use** — OpenAI-compatible `tools` parameter with function definitions, `tool_choice` control, parallel tool calls, argument validation, and multi-turn tool result messages
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
@@ -325,6 +326,13 @@ This project builds on insights from:
 - [x] v1.0 — Production-ready: model downloader, config files, graceful shutdown, criterion benchmarks, CORS, clippy-clean
 - [x] v1.1 — OpenAI embeddings API (`/v1/embeddings`), models listing (`/v1/models`), L2-normalized embedding extraction
 - [x] v1.2 — Chat templates (Llama 2/3, Mistral, Gemma, Phi-3, ChatML), stop sequences, repetition/frequency/presence penalties, proper token usage tracking
+- [x] v1.3 — K-quant GPU dequantization (Q4_K, Q6_K Metal shaders), unified quantized matvec dispatch
+- [x] v1.4 — INT8 KV cache quantization for 4x memory reduction
+- [x] v1.5 — RoPE scaling (Linear, NTK-aware, YaRN) + Min-P sampling
+- [x] v1.6 — Tail-Free Sampling (TFS) + Mirostat v1/v2 adaptive sampling
+- [x] v1.7 — Interactive chat CLI + JSON mode for structured output
+- [x] v1.8 — LoRA adapter support (load fine-tuned adapters from GGUF)
+- [x] v1.9 — Function calling / Tool use (OpenAI-compatible, multi-turn, parallel calls)
 
 ## Requirements
 

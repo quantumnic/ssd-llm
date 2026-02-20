@@ -494,11 +494,42 @@ fn handle_openai_chat(
     body: &str,
 ) -> Result<()> {
     use crate::inference::chat_template::{format_chat, ChatTemplateFormat};
+    use crate::inference::tool_use::{
+        extract_tool_calls, format_tool_calls_response, format_tool_results, format_tools_prompt,
+        has_tool_calls, parse_tool_messages, parse_tools, validate_tool_call, ToolChoice,
+    };
+
+    // Parse tools and tool_choice if present
+    let tools_json = extract_json_value(body, "tools");
+    let tools = tools_json.as_ref().map(parse_tools).unwrap_or_default();
+    let tool_choice = extract_json_value(body, "tool_choice")
+        .as_ref()
+        .map(ToolChoice::from_json)
+        .unwrap_or(if tools.is_empty() {
+            ToolChoice::None
+        } else {
+            ToolChoice::Auto
+        });
 
     // Parse all messages and format with appropriate chat template
     let messages = extract_chat_messages(body);
+
+    // Parse tool result messages from the raw JSON
+    let raw_messages = extract_json_value(body, "messages");
+    let tool_results = raw_messages
+        .as_ref()
+        .map(parse_tool_messages)
+        .unwrap_or_default();
+
     let prompt = if messages.is_empty() {
-        extract_last_message_content(body).unwrap_or_default()
+        let base = extract_last_message_content(body).unwrap_or_default();
+        let tools_section = format_tools_prompt(&tools, &tool_choice);
+        let tool_results_section = if tool_results.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{}", format_tool_results(&tool_results))
+        };
+        format!("{}{}{}", base, tools_section, tool_results_section)
     } else {
         // Detect template from model name
         let model_name = {
@@ -511,7 +542,14 @@ fn handle_openai_chat(
         } else {
             ChatTemplateFormat::from_model_name(&model_name)
         };
-        format_chat(&messages, format)
+        let base_prompt = format_chat(&messages, format);
+        let tools_section = format_tools_prompt(&tools, &tool_choice);
+        let tool_results_section = if tool_results.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{}", format_tool_results(&tool_results))
+        };
+        format!("{}{}{}", base_prompt, tools_section, tool_results_section)
     };
 
     let max_tokens = extract_json_number(body, "max_tokens").unwrap_or(128) as usize;
@@ -553,22 +591,52 @@ fn handle_openai_chat(
 
     match transformer::generate(gguf, streamer, cache, &prompt, &config) {
         Ok(result) => {
-            let output_text = if json_mode {
-                // Validate and extract JSON from the output
-                extract_json_from_output(&result.text)
+            // Check if the response contains tool calls
+            let detected_tool_calls = if !tools.is_empty() && has_tool_calls(&result.text) {
+                let calls = extract_tool_calls(&result.text);
+                // Validate each call against tool definitions
+                let valid_calls: Vec<_> = calls
+                    .into_iter()
+                    .filter(|c| validate_tool_call(c, &tools).is_ok())
+                    .collect();
+                if valid_calls.is_empty() {
+                    None
+                } else {
+                    Some(valid_calls)
+                }
             } else {
-                result.text.clone()
+                None
             };
 
-            let resp = format!(
-                r#"{{"id":"chatcmpl-ssd","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
-                unix_timestamp(),
-                model_name,
-                escape_json(&output_text),
-                result.prompt_tokens,
-                result.token_count,
-                result.prompt_tokens + result.token_count,
-            );
+            let resp = if let Some(ref calls) = detected_tool_calls {
+                // Tool call response
+                let tool_calls_json = format_tool_calls_response(calls);
+                format!(
+                    r#"{{"id":"chatcmpl-ssd","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":null,"tool_calls":{}}},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
+                    unix_timestamp(),
+                    model_name,
+                    tool_calls_json,
+                    result.prompt_tokens,
+                    result.token_count,
+                    result.prompt_tokens + result.token_count,
+                )
+            } else {
+                let output_text = if json_mode {
+                    extract_json_from_output(&result.text)
+                } else {
+                    result.text.clone()
+                };
+
+                format!(
+                    r#"{{"id":"chatcmpl-ssd","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
+                    unix_timestamp(),
+                    model_name,
+                    escape_json(&output_text),
+                    result.prompt_tokens,
+                    result.token_count,
+                    result.prompt_tokens + result.token_count,
+                )
+            };
             send_json_response(stream, 200, &resp)
         }
         Err(e) => {
@@ -950,6 +1018,28 @@ fn extract_response_format_type(json: &str) -> Option<String> {
     // Find "type" within the next ~100 chars (inside the response_format object)
     let chunk = &after[..after.len().min(200)];
     extract_json_string(chunk, "type")
+}
+
+/// Extract a JSON value (object, array, or string) for a given key from a JSON body.
+/// Uses serde_json to properly parse the full body and extract the field.
+fn extract_json_value(json: &str, key: &str) -> Option<serde_json::Value> {
+    // Try full parse first
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) {
+        return map.get(key).cloned();
+    }
+    // Fallback: try to find the key and parse the value after it
+    let pattern = format!(r#""{}""#, key);
+    let pos = json.find(&pattern)?;
+    let after = &json[pos + pattern.len()..];
+    let after = after.trim_start().strip_prefix(':')?;
+    let after = after.trim_start();
+    serde_json::from_str::<serde_json::Value>(after)
+        .ok()
+        .or_else(|| {
+            // Try parsing just until we find the end of the value
+            let mut de = serde_json::Deserializer::from_str(after).into_iter::<serde_json::Value>();
+            de.next()?.ok()
+        })
 }
 
 /// Extract valid JSON from model output, trying to find the first complete JSON value

@@ -237,6 +237,7 @@ fn handle_command(cmd: &str, history: &mut Vec<ChatMessage>, config: &ChatConfig
                         Role::System => "\x1b[1;33m",
                         Role::User => "\x1b[1;32m",
                         Role::Assistant => "\x1b[1;36m",
+                        Role::Tool => "\x1b[1;35m",
                     };
                     let preview = if msg.content.len() > 80 {
                         format!("{}...", &msg.content[..77])

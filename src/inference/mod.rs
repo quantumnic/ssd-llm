@@ -18,4 +18,5 @@ pub mod sliding_window;
 pub mod speculative;
 pub mod tensor_parallel;
 pub mod tokenizer;
+pub mod tool_use;
 pub mod transformer;

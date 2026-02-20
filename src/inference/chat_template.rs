@@ -173,6 +173,9 @@ fn format_mistral(messages: &[ChatMessage]) -> String {
             Role::Assistant => {
                 prompt.push_str(&format!(" {}</s> ", msg.content));
             }
+            Role::Tool => {
+                prompt.push_str(&format!("[INST] Tool result: {} [/INST]", msg.content));
+            }
         }
     }
     prompt
@@ -182,7 +185,7 @@ fn format_gemma(messages: &[ChatMessage]) -> String {
     let mut prompt = String::new();
     for msg in messages {
         let role = match msg.role {
-            Role::System | Role::User => "user",
+            Role::System | Role::User | Role::Tool => "user",
             Role::Assistant => "model",
         };
         prompt.push_str(&format!(
@@ -201,6 +204,7 @@ fn format_phi3(messages: &[ChatMessage]) -> String {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Tool => "tool",
         };
         prompt.push_str(&format!("<|{}|>\n{}<|end|>\n", role, msg.content));
     }

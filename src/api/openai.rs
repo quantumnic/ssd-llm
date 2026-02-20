@@ -9,6 +9,7 @@ pub enum Role {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 impl Role {
@@ -17,6 +18,7 @@ impl Role {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Tool => "tool",
         }
     }
 
@@ -24,6 +26,7 @@ impl Role {
         match s {
             "system" => Role::System,
             "assistant" => Role::Assistant,
+            "tool" => Role::Tool,
             _ => Role::User,
         }
     }

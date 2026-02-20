@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.9.0 — Function Calling / Tool Use (2026-02-20)
+
+### Added
+- **Function calling / Tool use** (`inference/tool_use.rs`):
+  - OpenAI-compatible `tools` parameter with function definitions
+  - `tool_choice` support: `"auto"`, `"none"`, `"required"`, or specific function (`{"type": "function", "function": {"name": "..."}}`)
+  - Multiple parallel tool calls in a single response
+  - Robust tool call extraction from model output: standard `tool_calls` format, legacy `function_call`, flat format, and markdown code blocks
+  - Argument validation against JSON Schema (required parameters, type checking)
+  - Tool result messages (`role: "tool"`) for multi-turn tool use conversations
+  - System prompt injection with tool definitions and usage instructions
+  - Tool call response format with `finish_reason: "tool_calls"` and structured `tool_calls` array
+  - `has_tool_calls()` fast-path detection to avoid unnecessary JSON parsing
+  - `validate_tool_call()` for schema validation before returning results
+  - `format_tool_calls_response()` for OpenAI-compatible response formatting
+  - `parse_tool_messages()` for extracting tool results from conversation history
+  - `build_tool_index()` for O(1) tool name lookup
+  - `find_matching_brace()` for robust JSON extraction from mixed text
+  - 25 new tests: parsing, extraction (all formats), validation, prompt formatting, tool choice modes, brace matching, embedded JSON
+- **Tool role** in chat system:
+  - `Role::Tool` added to chat message types
+  - Tool messages rendered with magenta color in interactive chat (`\x1b[1;35m`)
+  - All chat templates updated: Llama 2, Mistral, Gemma, Phi-3 handle tool messages
+- **`extract_json_value()` helper** in server.rs — full serde_json-based extraction for complex JSON fields (objects, arrays) with fallback parser
+- 33 new tests (169 → 202 total, all passing)
+
+### Why Function Calling Matters
+Function calling is the foundation of agent workflows. With tool use support, ssd-llm can participate in tool-augmented generation — the model can request weather data, search results, database queries, or any external action, receive the results, and incorporate them into its response. This makes ssd-llm viable as a local backend for frameworks like LangChain, AutoGen, and custom agent systems. Combined with the existing JSON mode, this provides robust structured interaction between the model and external systems.
+
+### Changed
+- `Role` enum extended with `Tool` variant across openai.rs, chat.rs, chat_template.rs
+- OpenAI `/v1/chat/completions` endpoint now accepts `tools` and `tool_choice` parameters
+- Tool call responses use `finish_reason: "tool_calls"` and include `tool_calls` array in message
+- Cargo.toml version bumped to 1.9.0
+
 ## v1.7.0 — Interactive Chat CLI + JSON Mode (2026-02-20)
 
 ### Added
