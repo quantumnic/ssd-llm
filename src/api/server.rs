@@ -1,10 +1,16 @@
 //! Ollama-compatible HTTP API server
 //!
+//! v1.13: Full Ollama model management API (show/pull/copy/delete/ps).
 //! v0.4: Added streaming responses (chunked transfer encoding).
 //! Implements the Ollama REST API for drop-in compatibility:
 //! - POST /api/generate — text generation (streaming + non-streaming)
 //! - POST /api/chat — chat completions (streaming + non-streaming)
+//! - POST /api/show — model information and metadata
+//! - POST /api/pull — download models from HuggingFace Hub
+//! - POST /api/copy — copy/alias a local model
+//! - DELETE /api/delete — remove a local model
 //! - GET /api/tags — list loaded models
+//! - GET /api/ps — running model process status
 //! - GET /api/version — server version
 //! - POST /v1/chat/completions — OpenAI-compatible endpoint (streaming SSE)
 
@@ -59,7 +65,7 @@ impl ApiServer {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let listener = TcpListener::bind(&addr)?;
         info!("ssd-llm API server listening on http://{}", addr);
-        info!("Ollama-compatible API: POST /api/generate, POST /api/chat, GET /api/tags");
+        info!("Ollama-compatible API: POST /api/generate, /api/chat, /api/show, /api/pull, /api/copy, DELETE /api/delete, GET /api/tags, /api/ps");
         info!(
             "OpenAI-compatible API: POST /v1/chat/completions, POST /v1/embeddings, GET /v1/models"
         );
@@ -193,6 +199,11 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("GET", "/api/version") => handle_version(&mut stream),
         ("POST", "/api/generate") => handle_generate(&mut stream, ctx, &body_str),
         ("POST", "/api/chat") => handle_chat(&mut stream, ctx, &body_str),
+        ("POST", "/api/show") => handle_show(&mut stream, ctx),
+        ("POST", "/api/pull") => handle_pull(&mut stream, &body_str),
+        ("POST", "/api/copy") => handle_copy(&mut stream, &body_str),
+        ("DELETE", "/api/delete") => handle_api_delete(&mut stream, &body_str),
+        ("GET", "/api/ps") => handle_ps(&mut stream, ctx),
         ("POST", "/v1/chat/completions") => handle_openai_chat(&mut stream, ctx, &body_str),
         ("POST", "/v1/embeddings") => handle_embeddings(&mut stream, ctx, &body_str),
         ("GET", "/v1/models") => handle_openai_models(&mut stream, ctx),
@@ -202,7 +213,7 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("GET", "/") => send_json_response(
             &mut stream,
             200,
-            r#"{"status":"ssd-llm is running","version":"1.1.0"}"#,
+            r#"{"status":"ssd-llm is running","version":"1.13.0"}"#,
         ),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
@@ -220,6 +231,47 @@ fn handle_tags(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result
     send_json_response(stream, 200, &resp)
 }
 
+fn handle_show(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
+    let ctx = ctx.lock().unwrap();
+    let info = crate::api::ollama_manage::model_info_from_gguf(
+        &ctx.gguf,
+        &ctx.model_name,
+        &ctx.model_path,
+    );
+    let json = crate::api::ollama_manage::model_info_to_json(&info);
+    send_json_response(stream, 200, &json)
+}
+
+fn handle_pull(stream: &mut TcpStream, body: &str) -> Result<()> {
+    let model_dir = crate::pull::default_model_dir();
+    let result = crate::api::ollama_manage::handle_pull(body, &model_dir);
+    let (status, json) = result.to_json();
+    send_json_response(stream, status, &json)
+}
+
+fn handle_copy(stream: &mut TcpStream, body: &str) -> Result<()> {
+    let model_dir = crate::pull::default_model_dir();
+    let (status, json) = crate::api::ollama_manage::handle_copy(body, &model_dir);
+    send_json_response(stream, status, &json)
+}
+
+fn handle_api_delete(stream: &mut TcpStream, body: &str) -> Result<()> {
+    let model_dir = crate::pull::default_model_dir();
+    let (status, json) = crate::api::ollama_manage::handle_delete(body, &model_dir);
+    send_json_response(stream, status, &json)
+}
+
+fn handle_ps(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
+    let ctx = ctx.lock().unwrap();
+    let quantization = crate::api::ollama_manage::detect_quantization_pub(&ctx.gguf);
+    let json = crate::api::ollama_manage::running_model_json(
+        &ctx.model_name,
+        ctx.gguf.file_size,
+        &quantization,
+    );
+    send_json_response(stream, 200, &json)
+}
+
 fn handle_cors_preflight(stream: &mut TcpStream) -> Result<()> {
     let resp = "HTTP/1.1 204 No Content\r\n\
         Access-Control-Allow-Origin: *\r\n\
@@ -233,7 +285,7 @@ fn handle_cors_preflight(stream: &mut TcpStream) -> Result<()> {
 }
 
 fn handle_version(stream: &mut TcpStream) -> Result<()> {
-    send_json_response(stream, 200, r#"{"version":"1.1.0-ssd-llm"}"#)
+    send_json_response(stream, 200, r#"{"version":"1.13.0-ssd-llm"}"#)
 }
 
 fn handle_health(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
