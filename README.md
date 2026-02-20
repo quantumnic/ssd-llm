@@ -65,6 +65,8 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🎲 Min-P Sampling** — Adaptive probability filtering that scales with model confidence for better quality/diversity trade-off
 - **✂️ Tail-Free Sampling (TFS)** — Second-derivative based tail removal for cleaner distributions than top-p
 - **🎯 Mirostat v1 & v2** — Adaptive perplexity-controlled sampling that maintains target surprise level for coherent text
+- **💬 Interactive Chat** — `ssd-llm chat` for multi-turn conversations with history, undo, system prompts, and streaming output
+- **📋 JSON Mode** — `response_format: { type: "json_object" }` for guaranteed valid JSON output via grammar-constrained generation
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start

@@ -200,6 +200,43 @@ enum Commands {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Interactive multi-turn chat with a model
+    Chat {
+        /// Path to GGUF model file
+        model: PathBuf,
+
+        /// Memory budget for layer cache (e.g. "8G", "4G", "512M")
+        #[arg(long, default_value = "8G")]
+        memory_budget: String,
+
+        /// System prompt to prepend to conversation
+        #[arg(long)]
+        system: Option<String>,
+
+        /// Temperature for sampling
+        #[arg(long, default_value_t = 0.7)]
+        temperature: f32,
+
+        /// Top-K sampling
+        #[arg(long, default_value_t = 40)]
+        top_k: usize,
+
+        /// Top-P (nucleus) sampling
+        #[arg(long, default_value_t = 0.9)]
+        top_p: f32,
+
+        /// Maximum tokens per response
+        #[arg(long, default_value_t = 512)]
+        max_tokens: usize,
+
+        /// Chat template override (chatml, llama2, llama3, mistral, gemma, phi3, raw)
+        #[arg(long)]
+        template: Option<String>,
+
+        /// Repetition penalty
+        #[arg(long, default_value_t = 1.1)]
+        repetition_penalty: f32,
+    },
     /// Generate or show configuration
     Config {
         /// Generate a default config file
@@ -613,6 +650,69 @@ fn main() -> Result<()> {
                 }
                 println!("  Total: {} model(s)", models.len());
             }
+        }
+
+        Commands::Chat {
+            model,
+            memory_budget,
+            system,
+            temperature,
+            top_k,
+            top_p,
+            max_tokens,
+            template,
+            repetition_penalty,
+        } => {
+            let budget = parse_memory_budget(&memory_budget)?;
+            info!("Loading model: {}", model.display());
+
+            let gguf = model::gguf::GgufFile::open(&model)?;
+            let loader = ssd::streamer::SsdStreamer::new(&model, budget)?;
+            let mut cache = model::cache::LayerCache::new(budget);
+
+            // Detect chat template
+            let template_format = if let Some(ref tmpl) = template {
+                match tmpl.to_lowercase().as_str() {
+                    "chatml" => inference::chat_template::ChatTemplateFormat::ChatML,
+                    "llama2" => inference::chat_template::ChatTemplateFormat::Llama2,
+                    "llama3" => inference::chat_template::ChatTemplateFormat::Llama3,
+                    "mistral" => inference::chat_template::ChatTemplateFormat::Mistral,
+                    "gemma" => inference::chat_template::ChatTemplateFormat::Gemma,
+                    "phi3" => inference::chat_template::ChatTemplateFormat::Phi3,
+                    "raw" => inference::chat_template::ChatTemplateFormat::Raw,
+                    _ => {
+                        println!("⚠ Unknown template '{}', falling back to auto-detect", tmpl);
+                        inference::chat_template::ChatTemplateFormat::from_model_name(
+                            &model.to_string_lossy(),
+                        )
+                    }
+                }
+            } else {
+                inference::chat_template::ChatTemplateFormat::from_model_name(
+                    &model.to_string_lossy(),
+                )
+            };
+
+            let chat_config = inference::chat::ChatConfig {
+                temperature,
+                top_k,
+                top_p,
+                max_tokens,
+                system_prompt: system,
+                template: template_format,
+                repetition_penalty,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+            };
+
+            println!(
+                "Model loaded: {} ({} layers, {} embd)",
+                model.display(),
+                gguf.n_layers(),
+                gguf.n_embd()
+            );
+
+            inference::chat::run_interactive(&gguf, &loader, &mut cache, &chat_config)?;
         }
 
         Commands::Config { init } => {

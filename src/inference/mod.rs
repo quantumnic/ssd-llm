@@ -1,9 +1,12 @@
 pub mod attention;
+pub mod chat;
+
 pub mod batch_scheduler;
 pub mod chat_template;
 pub mod feed_forward;
 pub mod flash_attention;
 pub mod gqa;
+pub mod json_mode;
 pub mod kv_cache;
 pub mod mmap_kv_cache;
 pub mod prompt_cache;

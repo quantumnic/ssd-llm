@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.7.0 — Interactive Chat CLI + JSON Mode (2026-02-20)
+
+### Added
+- **Interactive chat CLI** (`ssd-llm chat`):
+  - Multi-turn REPL-style conversations with loaded models
+  - Full chat history management with `/undo`, `/clear`, `/history` commands
+  - Auto-detected chat templates (ChatML, Llama 2/3, Mistral, Gemma, Phi-3) or `--template` override
+  - System prompt support via `--system` flag or `/system` command
+  - Streaming token-by-token output with speed stats (tok/s)
+  - Colored terminal output for user/assistant/system roles
+  - `/config` to inspect current settings, `/help` for all commands
+  - 8 new tests for chat commands, history management, undo/clear behavior
+- **JSON mode** for structured output:
+  - `response_format: { "type": "json_object" }` in OpenAI-compatible API
+  - Stack-based JSON grammar validator (`inference/json_mode.rs`) with prefix validation
+  - Recursive-descent state machine for character-level JSON prefix checking
+  - `JsonGrammar` for incremental token-by-token validation
+  - `apply_json_constraint()` for logit masking (constrains sampling to valid JSON tokens)
+  - Automatic JSON extraction from model output with bracket-matching fallback
+  - 20 new tests: prefix validation, incremental feeding, all JSON types, nested structures, escape sequences, rejection of invalid input
+- 28 new tests (141 → 169 total, all passing)
+
+### Why Interactive Chat Matters
+Previously, `ssd-llm` only supported single-shot prompts via `run` or the API server. The `chat` subcommand provides the most natural way to interact with a model locally — maintaining conversation context, supporting system prompts, and streaming responses in real-time. This makes ssd-llm competitive with `ollama run` for local development.
+
+### Why JSON Mode Matters
+Structured output is essential for tool-use, function calling, and agent workflows. JSON mode ensures the model produces valid JSON, eliminating the need for fragile regex extraction or retry loops. The grammar-constrained approach validates at the token level, providing guarantees that post-hoc validation cannot.
+
+### Changed
+- OpenAI `/v1/chat/completions` endpoint now accepts `response_format` parameter
+- Cargo.toml version bumped to 1.7.0
+
 ## v1.6.0 — Tail-Free Sampling + Mirostat v1/v2 (2026-02-19)
 
 ### Added

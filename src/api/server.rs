@@ -518,6 +518,11 @@ fn handle_openai_chat(
     let temperature = extract_json_float(body, "temperature").unwrap_or(0.7);
     let streaming = extract_json_bool(body, "stream").unwrap_or(false);
 
+    // Detect JSON mode from response_format
+    let json_mode = extract_response_format_type(body)
+        .map(|t| t == "json_object")
+        .unwrap_or(false);
+
     let config = InferenceConfig {
         temperature,
         top_k: 40,
@@ -548,11 +553,18 @@ fn handle_openai_chat(
 
     match transformer::generate(gguf, streamer, cache, &prompt, &config) {
         Ok(result) => {
+            let output_text = if json_mode {
+                // Validate and extract JSON from the output
+                extract_json_from_output(&result.text)
+            } else {
+                result.text.clone()
+            };
+
             let resp = format!(
                 r#"{{"id":"chatcmpl-ssd","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
                 unix_timestamp(),
                 model_name,
-                escape_json(&result.text),
+                escape_json(&output_text),
                 result.prompt_tokens,
                 result.token_count,
                 result.prompt_tokens + result.token_count,
@@ -929,6 +941,65 @@ fn extract_json_string_array(json: &str, key: &str) -> Option<Vec<String>> {
         }
     }
     Some(result)
+}
+
+/// Extract the "type" from response_format: {"type": "json_object"}
+fn extract_response_format_type(json: &str) -> Option<String> {
+    let pos = json.find(r#""response_format""#)?;
+    let after = &json[pos + 17..];
+    // Find "type" within the next ~100 chars (inside the response_format object)
+    let chunk = &after[..after.len().min(200)];
+    extract_json_string(chunk, "type")
+}
+
+/// Extract valid JSON from model output, trying to find the first complete JSON value
+fn extract_json_from_output(text: &str) -> String {
+    let trimmed = text.trim();
+
+    // Try parsing directly
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+
+    // Try to find JSON starting with { or [
+    for start_char in ['{', '['] {
+        if let Some(start) = trimmed.find(start_char) {
+            let substring = &trimmed[start..];
+            // Try progressively longer substrings
+            let end_char = if start_char == '{' { '}' } else { ']' };
+            let mut depth = 0;
+            let mut in_string = false;
+            let mut escaped = false;
+
+            for (i, ch) in substring.char_indices() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match ch {
+                    '\\' if in_string => escaped = true,
+                    '"' => in_string = !in_string,
+                    c if !in_string && c == start_char => depth += 1,
+                    c if !in_string && c == end_char => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let candidate = &substring[..=i];
+                            if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                                return candidate.to_string();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Fallback: wrap in a JSON object
+    format!(
+        r#"{{"response":{}}}"#,
+        serde_json::to_string(trimmed).unwrap_or_else(|_| format!(r#""{}""#, escape_json(trimmed)))
+    )
 }
 
 /// Extract all chat messages (role + content pairs) from an OpenAI messages array
