@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.12.0 — Vision/Multimodal Support (2026-02-20)
+
+### Added
+- **CLIP Vision Encoder**: Full ViT-L/14 implementation with patch embedding, multi-head self-attention, and MLP blocks
+- **Image Preprocessing**: Bicubic resize, center crop, CLIP normalization (ImageNet stats) — CHW tensor output
+- **Vision-Language Projection**: Linear and 2-layer MLP (LLaVA-1.5 style) projection from CLIP space to LLM embedding space
+- **Multimodal Content Parsing**: OpenAI-compatible `content` array with `text` and `image_url` parts (base64 data URLs and HTTP URLs)
+- **GGUF Vision Config Detection**: Auto-detect vision encoder parameters from GGUF metadata (`clip.vision.*` keys)
+- **Metal Shader**: `vision_patch_embed` kernel for GPU-accelerated patch embedding convolution + `vision_layer_norm` kernel
+- **Minimal PNG Decoder**: Base64 image decoding with PNG IHDR parsing and basic filter support
+- **Comprehensive Tests**: 16 new tests covering preprocessing, normalization, encoding, projection, base64, content parsing, and config detection
+
 ## v1.9.0 — Function Calling / Tool Use (2026-02-20)
 
 ### Added

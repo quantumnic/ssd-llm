@@ -71,6 +71,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🛠️ Function Calling / Tool Use** — OpenAI-compatible `tools` parameter with function definitions, `tool_choice` control, parallel tool calls, argument validation, and multi-turn tool result messages
 - **🧩 Mixture of Experts (MoE)** — Sparse expert routing for models like Mixtral 8x7B/8x22B: top-K gating, SSD-friendly on-demand expert loading, batch expert pre-selection, Metal gating shader
 - **📝 GBNF Grammar Constraints** — llama.cpp-compatible grammar-constrained generation for arbitrary structured output (SQL, XML, custom formats)
+- **👁️ Vision/Multimodal** — CLIP ViT encoder for LLaVA-style image understanding, OpenAI-compatible image_url content, base64 and URL image input
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start

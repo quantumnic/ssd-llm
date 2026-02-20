@@ -22,3 +22,5 @@ pub mod tensor_parallel;
 pub mod tokenizer;
 pub mod tool_use;
 pub mod transformer;
+#[allow(clippy::needless_range_loop, clippy::excessive_precision)]
+pub mod vision;
