@@ -109,6 +109,14 @@ enum Commands {
         /// LoRA scaling factor (default 1.0)
         #[arg(long, default_value_t = 1.0)]
         lora_scale: f32,
+
+        /// GBNF grammar string for constrained generation
+        #[arg(long)]
+        grammar: Option<String>,
+
+        /// Path to GBNF grammar file for constrained generation
+        #[arg(long)]
+        grammar_file: Option<PathBuf>,
     },
     /// Show model info from GGUF file
     Info {
@@ -378,7 +386,18 @@ fn main() -> Result<()> {
             kv_quantize,
             lora_adapters,
             lora_scale,
+            grammar,
+            grammar_file,
         } => {
+            // Load grammar from string or file
+            let grammar_str = if let Some(gf) = grammar_file {
+                std::fs::read_to_string(&gf).map_err(|e| {
+                    anyhow::anyhow!("Failed to read grammar file {}: {}", gf.display(), e)
+                })?
+            } else {
+                grammar.unwrap_or_default()
+            };
+
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
             info!(
@@ -418,6 +437,7 @@ fn main() -> Result<()> {
                 mirostat: 0,
                 mirostat_tau: 5.0,
                 mirostat_eta: 0.1,
+                grammar: grammar_str,
             };
 
             // Tensor parallelism

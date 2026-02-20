@@ -131,6 +131,7 @@ pub fn run_interactive(
             mirostat: 0,
             mirostat_tau: 5.0,
             mirostat_eta: 0.1,
+            grammar: String::new(),
         };
 
         // Generate response with streaming output

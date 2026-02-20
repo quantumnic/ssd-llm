@@ -13,7 +13,7 @@ use crate::ssd::prefetch::{PrefetchStrategy, Prefetcher};
 use crate::ssd::streamer::SsdStreamer;
 use anyhow::{bail, Result};
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct InferenceConfig {
     pub temperature: f32,
@@ -32,6 +32,8 @@ pub struct InferenceConfig {
     pub mirostat_tau: f32,
     /// Mirostat learning rate (eta), default 0.1
     pub mirostat_eta: f32,
+    /// GBNF grammar string for constrained generation (empty = disabled)
+    pub grammar: String,
 }
 
 /// Build the appropriate sampler from inference configuration
@@ -464,6 +466,20 @@ pub fn generate(
     let prefetcher = Prefetcher::new(PrefetchStrategy::LookAhead(2));
     let sampler = build_sampler(config);
 
+    // Parse grammar if provided
+    let grammar_acceptor = if !config.grammar.is_empty() {
+        match crate::inference::grammar::parse_grammar(&config.grammar) {
+            Ok(g) => Some(crate::inference::grammar::GrammarAcceptor::new(g)),
+            Err(e) => {
+                warn!("Failed to parse grammar, ignoring: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut grammar_state = grammar_acceptor;
+
     // Initialize KV cache
     let mut kv_cache = KvCache::new(n_layers as usize, n_head_kv, head_dim, n_ctx);
 
@@ -529,7 +545,7 @@ pub fn generate(
             rms_norm(&mut final_hidden, &norm_w);
         }
 
-        let logits = if let Ok(output_weight) =
+        let mut logits = if let Ok(output_weight) =
             streamer.load_named_tensor_f32(gguf, "output.weight")
         {
             matmul_1d(&final_hidden, &output_weight, vocab_size)
@@ -539,6 +555,14 @@ pub fn generate(
             vec![0.0f32; vocab_size]
         };
 
+        // Apply grammar constraints to logits
+        if let Some(ref acceptor) = grammar_state {
+            let token_strings: Vec<String> = (0..vocab_size)
+                .map(|id| tokenizer.decode(&[id as u32]))
+                .collect();
+            crate::inference::grammar::apply_grammar_mask(&mut logits, acceptor, &token_strings);
+        }
+
         let token_id = sampler.sample(&logits);
 
         if token_id == tokenizer.eos_id || token_id == 0 {
@@ -546,6 +570,12 @@ pub fn generate(
         }
 
         generated_tokens.push(token_id);
+
+        // Advance grammar state with the generated token
+        if let Some(ref mut acceptor) = grammar_state {
+            let token_str = tokenizer.decode(&[token_id]);
+            acceptor.accept_str(&token_str);
+        }
 
         // Embed new token and forward
         if let Ok(embeddings) = streamer.load_named_tensor_f32(gguf, "token_embd.weight") {

@@ -95,10 +95,7 @@ pub fn compute_gating(
     }
 
     // Sort by index for deterministic ordering (helpful for caching)
-    let mut pairs: Vec<(usize, f32)> = expert_indices
-        .into_iter()
-        .zip(expert_weights)
-        .collect();
+    let mut pairs: Vec<(usize, f32)> = expert_indices.into_iter().zip(expert_weights).collect();
     pairs.sort_by_key(|(idx, _)| *idx);
     expert_indices = pairs.iter().map(|(i, _)| *i).collect();
     expert_weights = pairs.iter().map(|(_, w)| *w).collect();

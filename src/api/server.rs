@@ -280,6 +280,7 @@ fn handle_generate(
         mirostat,
         mirostat_tau,
         mirostat_eta,
+        grammar: extract_json_string(body, "grammar").unwrap_or_default(),
     };
 
     if streaming {
@@ -395,6 +396,7 @@ fn handle_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &st
         mirostat: extract_json_number(body, "mirostat").unwrap_or(0) as u8,
         mirostat_tau: extract_json_float(body, "mirostat_tau").unwrap_or(5.0),
         mirostat_eta: extract_json_float(body, "mirostat_eta").unwrap_or(0.1),
+        grammar: extract_json_string(body, "grammar").unwrap_or_default(),
     };
 
     if streaming {
@@ -574,6 +576,7 @@ fn handle_openai_chat(
         mirostat: 0,
         mirostat_tau: 5.0,
         mirostat_eta: 0.1,
+        grammar: extract_json_string(body, "grammar").unwrap_or_default(),
     };
 
     if streaming {

@@ -50,6 +50,7 @@ pub struct InferenceConfig {
     pub mirostat: u8,
     pub mirostat_tau: f32,
     pub mirostat_eta: f32,
+    pub grammar: String,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +89,7 @@ impl Default for Config {
                 mirostat: 0,
                 mirostat_tau: 5.0,
                 mirostat_eta: 0.1,
+                grammar: String::new(),
             },
             paths: PathsConfig {
                 model_dir: PathBuf::from("models"),

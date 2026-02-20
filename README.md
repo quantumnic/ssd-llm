@@ -70,6 +70,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🔗 LoRA Adapters** — Load LoRA adapters from GGUF files at inference time with configurable scaling, support for multiple simultaneous adapters
 - **🛠️ Function Calling / Tool Use** — OpenAI-compatible `tools` parameter with function definitions, `tool_choice` control, parallel tool calls, argument validation, and multi-turn tool result messages
 - **🧩 Mixture of Experts (MoE)** — Sparse expert routing for models like Mixtral 8x7B/8x22B: top-K gating, SSD-friendly on-demand expert loading, batch expert pre-selection, Metal gating shader
+- **📝 GBNF Grammar Constraints** — llama.cpp-compatible grammar-constrained generation for arbitrary structured output (SQL, XML, custom formats)
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
@@ -149,6 +150,27 @@ ssd-llm serve model.gguf --lora adapter.gguf
 ```
 
 LoRA adapters are loaded from GGUF files containing `*.lora_a` / `*.lora_b` tensor pairs. The adapter weights are merged into the base model weights at layer-load time using the formula: `W' = W + (alpha/r) * scale * B @ A`. Rank and alpha are auto-detected from GGUF metadata.
+
+### Grammar-Constrained Generation
+
+Use GBNF grammars (llama.cpp-compatible) to constrain output to any structured format:
+
+```bash
+# Inline grammar
+ssd-llm run model.gguf --prompt "Generate a color:" --grammar 'root ::= "red" | "green" | "blue"'
+
+# Grammar from file
+ssd-llm run model.gguf --prompt "Write SQL:" --grammar-file sql.gbnf
+
+# Via API (Ollama endpoint)
+curl -s http://localhost:11434/api/chat -d '{
+  "model": "llama3",
+  "messages": [{"role": "user", "content": "List 3 colors as JSON"}],
+  "grammar": "root ::= \"[\" ws item (\",\" ws item)* ws \"]\"\nitem ::= \"\\\"\" [a-z]+ \"\\\"\"\nws ::= [ ]*"
+}'
+```
+
+GBNF grammars support: literals, character classes (`[a-z]`, `[^0-9]`), rule references, groups, quantifiers (`?`, `*`, `+`), and alternatives (`|`). The grammar engine filters token logits at each generation step, ensuring output always matches the defined grammar.
 
 ## API Server
 
@@ -257,6 +279,7 @@ src/
     prompt_cache.rs    — Prompt prefix KV state caching
     batch_scheduler.rs — Continuous batching scheduler
     tensor_parallel.rs — Multi-threaded tensor parallelism
+    grammar.rs         — GBNF grammar parser + constrained generation engine
   metal/
     compute.rs         — Metal compute + SIMD-optimized ops (auto GPU dispatch)
     gpu.rs             — metal-rs GPU pipeline (real Metal compute)
@@ -334,6 +357,8 @@ This project builds on insights from:
 - [x] v1.7 — Interactive chat CLI + JSON mode for structured output
 - [x] v1.8 — LoRA adapter support (load fine-tuned adapters from GGUF)
 - [x] v1.9 — Function calling / Tool use (OpenAI-compatible, multi-turn, parallel calls)
+- [x] v1.10 — Mixture of Experts (MoE) — sparse expert routing for Mixtral-style models
+- [x] v1.11 — GBNF grammar-constrained generation for arbitrary structured output
 
 ## Requirements
 

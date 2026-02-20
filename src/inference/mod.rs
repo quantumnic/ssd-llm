@@ -6,6 +6,7 @@ pub mod chat_template;
 pub mod feed_forward;
 pub mod flash_attention;
 pub mod gqa;
+pub mod grammar;
 pub mod json_mode;
 pub mod kv_cache;
 pub mod lora;
