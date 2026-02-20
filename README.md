@@ -67,6 +67,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🎯 Mirostat v1 & v2** — Adaptive perplexity-controlled sampling that maintains target surprise level for coherent text
 - **💬 Interactive Chat** — `ssd-llm chat` for multi-turn conversations with history, undo, system prompts, and streaming output
 - **📋 JSON Mode** — `response_format: { type: "json_object" }` for guaranteed valid JSON output via grammar-constrained generation
+- **🔗 LoRA Adapters** — Load LoRA adapters from GGUF files at inference time with configurable scaling, support for multiple simultaneous adapters
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
@@ -126,6 +127,26 @@ ssd-llm config --init
 # Run micro-benchmarks
 cargo bench
 ```
+
+## LoRA Adapters
+
+Load fine-tuned LoRA adapters at inference time without modifying the base model:
+
+```bash
+# Run with a single LoRA adapter
+ssd-llm run model.gguf --prompt "Hello" --lora adapter.gguf
+
+# Multiple adapters with custom scaling
+ssd-llm run model.gguf --prompt "Hello" --lora adapter1.gguf --lora adapter2.gguf --lora-scale 0.8
+
+# Chat with LoRA adapter
+ssd-llm chat model.gguf --lora adapter.gguf
+
+# Serve with LoRA adapter
+ssd-llm serve model.gguf --lora adapter.gguf
+```
+
+LoRA adapters are loaded from GGUF files containing `*.lora_a` / `*.lora_b` tensor pairs. The adapter weights are merged into the base model weights at layer-load time using the formula: `W' = W + (alpha/r) * scale * B @ A`. Rank and alpha are auto-detected from GGUF metadata.
 
 ## API Server
 

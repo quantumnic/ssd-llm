@@ -8,6 +8,7 @@ pub mod flash_attention;
 pub mod gqa;
 pub mod json_mode;
 pub mod kv_cache;
+pub mod lora;
 pub mod mmap_kv_cache;
 pub mod prompt_cache;
 pub mod quantized_kv_cache;

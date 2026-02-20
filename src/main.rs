@@ -101,6 +101,14 @@ enum Commands {
         /// Enable INT8 KV cache quantization (4x memory reduction, longer contexts)
         #[arg(long, default_value_t = false)]
         kv_quantize: bool,
+
+        /// Path to LoRA adapter GGUF file(s) — can be specified multiple times
+        #[arg(long = "lora")]
+        lora_adapters: Vec<PathBuf>,
+
+        /// LoRA scaling factor (default 1.0)
+        #[arg(long, default_value_t = 1.0)]
+        lora_scale: f32,
     },
     /// Show model info from GGUF file
     Info {
@@ -180,6 +188,14 @@ enum Commands {
         /// Enable INT8 KV cache quantization (4x memory reduction, longer contexts)
         #[arg(long, default_value_t = false)]
         kv_quantize: bool,
+
+        /// Path to LoRA adapter GGUF file(s) — can be specified multiple times
+        #[arg(long = "lora")]
+        lora_adapters: Vec<PathBuf>,
+
+        /// LoRA scaling factor (default 1.0)
+        #[arg(long, default_value_t = 1.0)]
+        lora_scale: f32,
     },
     /// Download a GGUF model from Hugging Face
     Pull {
@@ -236,6 +252,14 @@ enum Commands {
         /// Repetition penalty
         #[arg(long, default_value_t = 1.1)]
         repetition_penalty: f32,
+
+        /// Path to LoRA adapter GGUF file(s) — can be specified multiple times
+        #[arg(long = "lora")]
+        lora_adapters: Vec<PathBuf>,
+
+        /// LoRA scaling factor (default 1.0)
+        #[arg(long, default_value_t = 1.0)]
+        lora_scale: f32,
     },
     /// Generate or show configuration
     Config {
@@ -352,6 +376,8 @@ fn main() -> Result<()> {
             mmap_kv,
             flash_attention,
             kv_quantize,
+            lora_adapters,
+            lora_scale,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
@@ -447,6 +473,21 @@ fn main() -> Result<()> {
             // KV cache quantization
             if kv_quantize {
                 println!("🔢 INT8 KV cache quantization enabled (4x memory reduction)");
+            }
+
+            // LoRA adapters
+            let mut _lora_mgr = inference::lora::LoraManager::new();
+            for lora_path in &lora_adapters {
+                _lora_mgr.add_adapter(lora_path, lora_scale)?;
+                println!("🔗 LoRA adapter loaded: {}", lora_path.display());
+            }
+            if !_lora_mgr.is_empty() {
+                for info in _lora_mgr.summary() {
+                    println!(
+                        "   ├─ rank={}, alpha={}, scale={}, weights={}",
+                        info.rank, info.alpha, info.scale, info.num_weights
+                    );
+                }
             }
 
             // Prompt caching
@@ -577,6 +618,8 @@ fn main() -> Result<()> {
             mmap_kv: _,
             flash_attention: _,
             kv_quantize: _,
+            lora_adapters,
+            lora_scale,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             let tp_shards = if tensor_parallel > 0 {
@@ -584,6 +627,14 @@ fn main() -> Result<()> {
             } else {
                 inference::tensor_parallel::auto_detect_shards(budget)
             };
+
+            // Load LoRA adapters
+            let mut lora_mgr = inference::lora::LoraManager::new();
+            for lora_path in &lora_adapters {
+                lora_mgr.add_adapter(lora_path, lora_scale)?;
+                println!("🔗 LoRA adapter loaded: {}", lora_path.display());
+            }
+
             let server = api::server::ApiServer::new(api::server::ServerConfig {
                 host,
                 port,
@@ -662,6 +713,8 @@ fn main() -> Result<()> {
             max_tokens,
             template,
             repetition_penalty,
+            lora_adapters,
+            lora_scale,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             info!("Loading model: {}", model.display());
@@ -669,6 +722,13 @@ fn main() -> Result<()> {
             let gguf = model::gguf::GgufFile::open(&model)?;
             let loader = ssd::streamer::SsdStreamer::new(&model, budget)?;
             let mut cache = model::cache::LayerCache::new(budget);
+
+            // Load LoRA adapters
+            let mut _lora_mgr = inference::lora::LoraManager::new();
+            for lora_path in &lora_adapters {
+                _lora_mgr.add_adapter(lora_path, lora_scale)?;
+                println!("🔗 LoRA adapter loaded: {}", lora_path.display());
+            }
 
             // Detect chat template
             let template_format = if let Some(ref tmpl) = template {

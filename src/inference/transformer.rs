@@ -3,6 +3,7 @@
 use crate::inference::attention::multi_head_attention_cached;
 use crate::inference::feed_forward::feed_forward;
 use crate::inference::kv_cache::KvCache;
+use crate::inference::lora::LoraManager;
 use crate::inference::sampler::{MirostatMode, Sampler};
 use crate::inference::tokenizer::SimpleTokenizer;
 use crate::model::cache::{CachedLayer, LayerCache};
@@ -93,6 +94,29 @@ pub fn batch_prefill(
     start_position: usize,
     prefetcher: &Prefetcher,
 ) -> Result<Vec<f32>> {
+    batch_prefill_lora(
+        gguf,
+        streamer,
+        layer_cache,
+        kv_cache,
+        token_embeddings,
+        start_position,
+        prefetcher,
+        None,
+    )
+}
+
+/// Batch prefill with optional LoRA adapter support
+pub fn batch_prefill_lora(
+    gguf: &GgufFile,
+    streamer: &SsdStreamer,
+    layer_cache: &mut LayerCache,
+    kv_cache: &mut KvCache,
+    token_embeddings: &[Vec<f32>],
+    start_position: usize,
+    prefetcher: &Prefetcher,
+    mut lora: Option<&mut LoraManager>,
+) -> Result<Vec<f32>> {
     let n_layers = gguf.n_layers();
     let n_embd = gguf.n_embd() as usize;
     let n_head = gguf.n_head() as usize;
@@ -113,7 +137,11 @@ pub fn batch_prefill(
 
         // Load layer once
         if layer_cache.get(layer_idx).is_none() {
-            let layer = streamer.load_layer(gguf, layer_idx)?;
+            let mut layer = streamer.load_layer(gguf, layer_idx)?;
+            // Apply LoRA adapters to layer weights before caching
+            if let Some(ref mut mgr) = lora {
+                apply_lora_to_layer(&mut layer, mgr);
+            }
             layer_cache.insert(layer_idx, layer);
         }
 
@@ -200,6 +228,7 @@ pub fn forward_pass_pub(
         hidden_state,
         position,
         prefetcher,
+        None,
     )
 }
 
@@ -213,6 +242,7 @@ fn forward_pass(
     hidden_state: &mut Vec<f32>,
     position: usize,
     prefetcher: &Prefetcher,
+    mut lora: Option<&mut LoraManager>,
 ) -> Result<()> {
     let n_layers = gguf.n_layers();
     let n_embd = gguf.n_embd() as usize;
@@ -226,7 +256,10 @@ fn forward_pass(
 
         // Load layer into cache if not present
         if layer_cache.get(layer_idx).is_none() {
-            let layer = streamer.load_layer(gguf, layer_idx)?;
+            let mut layer = streamer.load_layer(gguf, layer_idx)?;
+            if let Some(ref mut mgr) = lora {
+                apply_lora_to_layer(&mut layer, mgr);
+            }
             layer_cache.insert(layer_idx, layer);
         }
 
@@ -298,6 +331,19 @@ fn find_tensor_in_layer<'a>(
 ) -> Option<&'a Vec<f32>> {
     let full_name = format!("blk.{}.{}", layer_idx, suffix);
     cached.tensors.get(&full_name)
+}
+
+/// Apply all LoRA adapters to a cached layer's tensors in-place.
+/// This modifies the cached layer so subsequent reads automatically include LoRA deltas.
+fn apply_lora_to_layer(cached: &mut CachedLayer, lora: &mut LoraManager) {
+    let tensor_names: Vec<String> = cached.tensors.keys().cloned().collect();
+    for name in tensor_names {
+        if lora.has_weight(&name) {
+            if let Some(weight) = cached.tensors.get_mut(&name) {
+                lora.apply_to_weight(&name, weight);
+            }
+        }
+    }
 }
 
 /// RMS Normalization in-place
@@ -440,6 +486,7 @@ pub fn generate(
             &mut hidden_state,
             pos,
             &prefetcher,
+            None,
         )?;
         pos += 1;
     }
@@ -558,6 +605,7 @@ impl<'a> StreamingGenerator<'a> {
             &mut self.hidden_state,
             self.position,
             &self.prefetcher,
+            None,
         )?;
 
         self.position += 1;

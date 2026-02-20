@@ -385,6 +385,21 @@ impl GgufFile {
             .map(|t| t.size_bytes)
             .sum()
     }
+
+    /// Get a u32 metadata value by key
+    pub fn get_u32(&self, key: &str) -> Option<u32> {
+        self.metadata.get(key).and_then(|v| v.as_u32())
+    }
+
+    /// Get a f32 metadata value by key
+    pub fn get_f32(&self, key: &str) -> Option<f32> {
+        self.metadata.get(key).and_then(|v| v.as_f32())
+    }
+
+    /// Get all tensor names
+    pub fn tensor_names(&self) -> Vec<String> {
+        self.tensors.iter().map(|t| t.name.clone()).collect()
+    }
 }
 
 fn read_gguf_string<R: Read>(reader: &mut R) -> Result<String> {
