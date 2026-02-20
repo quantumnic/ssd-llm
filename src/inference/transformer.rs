@@ -4,6 +4,7 @@ use crate::inference::attention::multi_head_attention_cached;
 use crate::inference::feed_forward::feed_forward;
 use crate::inference::kv_cache::KvCache;
 use crate::inference::lora::LoraManager;
+use crate::inference::moe::{self, ExpertWeights, MoeConfig};
 use crate::inference::sampler::{MirostatMode, Sampler};
 use crate::inference::tokenizer::SimpleTokenizer;
 use crate::model::cache::{CachedLayer, LayerCache};
@@ -122,6 +123,7 @@ pub fn batch_prefill_lora(
     let n_head = gguf.n_head() as usize;
     let n_head_kv = gguf.n_head_kv() as usize;
     let head_dim = n_embd / n_head;
+    let moe_config = detect_moe_config(gguf);
     let n_tokens = token_embeddings.len();
 
     if n_tokens == 0 {
@@ -188,13 +190,10 @@ pub fn batch_prefill_lora(
                 rms_norm(&mut ffn_input, norm_w);
             }
 
-            // 4. Feed-Forward Network
-            if let (Some(w_gate), Some(w_up), Some(w_down)) = (
-                find_tensor_in_layer(cached, "ffn_gate.weight", layer_idx),
-                find_tensor_in_layer(cached, "ffn_up.weight", layer_idx),
-                find_tensor_in_layer(cached, "ffn_down.weight", layer_idx),
-            ) {
-                let ffn_output = feed_forward(&ffn_input, w_gate, w_up, w_down, n_embd);
+            // 4. Feed-Forward Network (dense or MoE)
+            if let Some(ffn_output) =
+                run_ffn_or_moe(&ffn_input, cached, layer_idx, moe_config.as_ref(), n_embd)
+            {
                 for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
                     *h += f;
                 }
@@ -249,6 +248,7 @@ fn forward_pass(
     let n_head = gguf.n_head() as usize;
     let n_head_kv = gguf.n_head_kv() as usize;
     let head_dim = n_embd / n_head;
+    let moe_config = detect_moe_config(gguf);
 
     for layer_idx in 0..n_layers {
         // Issue prefetch for next layer(s)
@@ -303,13 +303,10 @@ fn forward_pass(
             rms_norm(&mut ffn_input, norm_w);
         }
 
-        // 4. Feed-Forward Network
-        if let (Some(w_gate), Some(w_up), Some(w_down)) = (
-            find_tensor_in_layer(cached, "ffn_gate.weight", layer_idx),
-            find_tensor_in_layer(cached, "ffn_up.weight", layer_idx),
-            find_tensor_in_layer(cached, "ffn_down.weight", layer_idx),
-        ) {
-            let ffn_output = feed_forward(&ffn_input, w_gate, w_up, w_down, n_embd);
+        // 4. Feed-Forward Network (dense or MoE)
+        if let Some(ffn_output) =
+            run_ffn_or_moe(&ffn_input, cached, layer_idx, moe_config.as_ref(), n_embd)
+        {
             // Residual connection
             for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
                 *h += f;
@@ -321,6 +318,87 @@ fn forward_pass(
     }
 
     Ok(())
+}
+
+/// Detect MoE configuration from GGUF metadata
+fn detect_moe_config(gguf: &GgufFile) -> Option<MoeConfig> {
+    if gguf.is_moe() {
+        let config = MoeConfig::new(gguf.n_experts() as usize, gguf.n_experts_used() as usize);
+        if config.validate() {
+            info!(
+                "MoE model detected: {} experts, {} used per token",
+                config.n_experts, config.n_experts_used
+            );
+            return Some(config);
+        }
+    }
+    None
+}
+
+/// Run FFN or MoE-FFN depending on layer tensors.
+/// For MoE: uses gating network to select top-K experts, runs only those.
+/// For dense: runs standard SwiGLU FFN.
+fn run_ffn_or_moe(
+    ffn_input: &[f32],
+    cached: &CachedLayer,
+    layer_idx: u32,
+    moe_config: Option<&MoeConfig>,
+    n_embd: usize,
+) -> Option<Vec<f32>> {
+    // Check for MoE: look for expert tensors and gate
+    if let Some(config) = moe_config {
+        let gate_key = format!("blk.{}.ffn_gate_inp.weight", layer_idx);
+        if let Some(gate_weights) = cached.tensors.get(&gate_key) {
+            // Collect expert weights
+            let mut experts: Vec<Option<ExpertWeights<'_>>> =
+                (0..config.n_experts).map(|_| None).collect();
+            let mut all_found = true;
+
+            for (expert_idx, slot) in experts.iter_mut().enumerate().take(config.n_experts) {
+                let eg = format!("blk.{}.ffn_gate.{}.weight", layer_idx, expert_idx);
+                let eu = format!("blk.{}.ffn_up.{}.weight", layer_idx, expert_idx);
+                let ed = format!("blk.{}.ffn_down.{}.weight", layer_idx, expert_idx);
+
+                if let (Some(wg), Some(wu), Some(wd)) = (
+                    cached.tensors.get(&eg),
+                    cached.tensors.get(&eu),
+                    cached.tensors.get(&ed),
+                ) {
+                    *slot = Some(ExpertWeights {
+                        w_gate: wg,
+                        w_up: wu,
+                        w_down: wd,
+                    });
+                } else {
+                    all_found = false;
+                    break;
+                }
+            }
+
+            if all_found {
+                let expert_refs: Vec<ExpertWeights<'_>> =
+                    experts.into_iter().map(|e| e.unwrap()).collect();
+                return Some(moe::moe_forward(
+                    ffn_input,
+                    gate_weights,
+                    &expert_refs,
+                    config,
+                    n_embd,
+                ));
+            }
+        }
+    }
+
+    // Standard dense FFN fallback
+    if let (Some(w_gate), Some(w_up), Some(w_down)) = (
+        find_tensor_in_layer(cached, "ffn_gate.weight", layer_idx),
+        find_tensor_in_layer(cached, "ffn_up.weight", layer_idx),
+        find_tensor_in_layer(cached, "ffn_down.weight", layer_idx),
+    ) {
+        Some(feed_forward(ffn_input, w_gate, w_up, w_down, n_embd))
+    } else {
+        None
+    }
 }
 
 /// Helper: find a tensor in a cached layer by suffix

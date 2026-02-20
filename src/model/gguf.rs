@@ -364,6 +364,29 @@ impl GgufFile {
             .unwrap_or(0)
     }
 
+    /// Get number of experts (0 if not a MoE model)
+    pub fn n_experts(&self) -> u32 {
+        let arch = self.architecture();
+        self.metadata
+            .get(&format!("{}.expert_count", arch))
+            .and_then(|v| v.as_u32())
+            .unwrap_or(0)
+    }
+
+    /// Get number of experts used per token (0 if not MoE)
+    pub fn n_experts_used(&self) -> u32 {
+        let arch = self.architecture();
+        self.metadata
+            .get(&format!("{}.expert_used_count", arch))
+            .and_then(|v| v.as_u32())
+            .unwrap_or(0)
+    }
+
+    /// Check if this is a Mixture of Experts model
+    pub fn is_moe(&self) -> bool {
+        self.n_experts() > 0 && self.n_experts_used() > 0
+    }
+
     /// Find tensor by name
     pub fn find_tensor(&self, name: &str) -> Option<&TensorInfo> {
         self.tensors.iter().find(|t| t.name == name)

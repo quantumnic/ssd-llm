@@ -69,6 +69,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **📋 JSON Mode** — `response_format: { type: "json_object" }` for guaranteed valid JSON output via grammar-constrained generation
 - **🔗 LoRA Adapters** — Load LoRA adapters from GGUF files at inference time with configurable scaling, support for multiple simultaneous adapters
 - **🛠️ Function Calling / Tool Use** — OpenAI-compatible `tools` parameter with function definitions, `tool_choice` control, parallel tool calls, argument validation, and multi-turn tool result messages
+- **🧩 Mixture of Experts (MoE)** — Sparse expert routing for models like Mixtral 8x7B/8x22B: top-K gating, SSD-friendly on-demand expert loading, batch expert pre-selection, Metal gating shader
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start

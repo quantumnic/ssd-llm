@@ -10,6 +10,7 @@ pub mod json_mode;
 pub mod kv_cache;
 pub mod lora;
 pub mod mmap_kv_cache;
+pub mod moe;
 pub mod prompt_cache;
 pub mod quantized_kv_cache;
 pub mod rope_scaling;
