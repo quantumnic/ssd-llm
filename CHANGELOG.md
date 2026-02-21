@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.18.0 — Quantized Block Swapping — INT8 Compression for SSD I/O (2026-02-21)
+
+### Added
+- **INT8 quantized block swapping**: Per-row absmax INT8 quantization of KV cache blocks before writing to SSD swap file, reducing I/O bandwidth by ~4x
+- **`SwapQuantMode` enum**: `None` (f32, default) or `Int8` modes for swap file storage
+- **`--swap-quantize` CLI flag**: Enable INT8 quantized swapping on the serve command
+- **`inference.swap_quantize` config**: TOML configuration for persistent swap quantization setting
+- **`swap_compression_ratio()` utility**: Calculate theoretical compression ratio for given block dimensions
+- **`SwapFile::with_quant_mode()`**: Constructor for swap files with configurable quantization
+- **`BlockSwapper::with_quant_mode()`**: Constructor for block swapper with quantization support
+- **7 new tests** (295 total): quantize/dequantize roundtrip, zero handling, INT8 swap file I/O, size comparison, block swapper INT8 roundtrip, slot reuse, compression ratio
+
+### Technical Details
+- Quantization scheme: symmetric per-row absmax (`scale = max(|x|) / 127`)
+- Swap file format (INT8 mode): `[keys_i8][values_i8][key_scales_f32][val_scales_f32][num_filled_u32]`
+- Typical compression: ~3.8x for block_size=16, kv_dim=128 (from 16KB to ~4KB per block)
+- Quantization error bounded by absmax/127 per element (~0.8% relative error)
+
 ## v1.15.0 — Q2_K/Q8_K GPU Dequantization — Complete K-Quant Family (2026-02-21)
 
 ### Added

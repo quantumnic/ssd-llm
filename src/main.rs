@@ -216,6 +216,10 @@ enum Commands {
         /// PagedAttention block size in tokens (default: 16)
         #[arg(long, default_value_t = 16)]
         paged_block_size: usize,
+
+        /// Quantize KV blocks to INT8 when swapping to SSD (4x less I/O)
+        #[arg(long, default_value_t = false)]
+        swap_quantize: bool,
     },
     /// Download a GGUF model from Hugging Face
     Pull {
@@ -655,6 +659,7 @@ fn main() -> Result<()> {
             paged_kv,
             paged_kv_blocks,
             paged_block_size,
+            swap_quantize,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             let tp_shards = if tensor_parallel > 0 {
@@ -672,12 +677,17 @@ fn main() -> Result<()> {
 
             if paged_kv {
                 println!(
-                    "📄 PagedAttention enabled: block_size={}, blocks={}",
+                    "📄 PagedAttention enabled: block_size={}, blocks={}{}",
                     paged_block_size,
                     if paged_kv_blocks > 0 {
                         format!("{}", paged_kv_blocks)
                     } else {
                         "auto".to_string()
+                    },
+                    if swap_quantize {
+                        " (INT8 quantized swap)"
+                    } else {
+                        ""
                     }
                 );
             }
@@ -696,6 +706,7 @@ fn main() -> Result<()> {
                 paged_kv,
                 paged_kv_blocks,
                 paged_block_size,
+                swap_quantize,
             });
             server.run()?;
         }
@@ -843,6 +854,7 @@ fn main() -> Result<()> {
                         println!("Server: {}:{}", cfg.server.host, cfg.server.port);
                         println!("Flash attention: {}", cfg.inference.flash_attention);
                         println!("KV quantization: {}", cfg.inference.kv_quantize);
+                        println!("Swap quantization: {}", cfg.inference.swap_quantize);
                         println!("Sliding window: {}", cfg.inference.sliding_window);
                         println!("Model directory: {}", cfg.paths.model_dir.display());
                     }

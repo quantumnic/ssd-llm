@@ -21,6 +21,58 @@ use std::path::{Path, PathBuf};
 
 use tracing::{debug, info, warn};
 
+/// Quantization mode for SSD block swapping
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SwapQuantMode {
+    /// Store blocks as raw f32 (no compression)
+    #[default]
+    None,
+    /// Quantize to INT8 with per-vector absmax scale (4x size reduction)
+    Int8,
+}
+
+/// Quantize an f32 slice to INT8 with absmax scaling.
+/// Returns (quantized_data, scales) where each row of `dim` elements gets one scale.
+fn quantize_vectors_int8(data: &[f32], dim: usize) -> (Vec<i8>, Vec<f32>) {
+    let n_rows = data.len() / dim;
+    let mut quantized = vec![0i8; data.len()];
+    let mut scales = vec![0.0f32; n_rows];
+
+    for (row, scale) in scales.iter_mut().enumerate().take(n_rows) {
+        let start = row * dim;
+        let end = start + dim;
+        let row_data = &data[start..end];
+
+        let absmax = row_data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        if absmax == 0.0 {
+            continue;
+        }
+
+        let inv_scale = 127.0 / absmax;
+        *scale = absmax / 127.0;
+
+        for (i, &v) in row_data.iter().enumerate() {
+            quantized[start + i] = (v * inv_scale).round().clamp(-127.0, 127.0) as i8;
+        }
+    }
+
+    (quantized, scales)
+}
+
+/// Dequantize INT8 data back to f32 using per-vector scales.
+fn dequantize_vectors_int8(quantized: &[i8], scales: &[f32], dim: usize) -> Vec<f32> {
+    let mut output = vec![0.0f32; quantized.len()];
+
+    for (row, &scale) in scales.iter().enumerate() {
+        let start = row * dim;
+        for i in 0..dim {
+            output[start + i] = quantized[start + i] as f32 * scale;
+        }
+    }
+
+    output
+}
+
 /// Identity of a block in the paged cache: (layer_index, physical_block_id)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId {
@@ -73,11 +125,23 @@ pub struct SwapFile {
     total_bytes_written: u64,
     /// Total bytes read
     total_bytes_read: u64,
+    /// Quantization mode for SSD storage
+    quant_mode: SwapQuantMode,
 }
 
 impl SwapFile {
     /// Create or open a swap file at the given path
     pub fn new(swap_dir: &Path, block_size: usize, kv_dim: usize) -> io::Result<Self> {
+        Self::with_quant_mode(swap_dir, block_size, kv_dim, SwapQuantMode::None)
+    }
+
+    /// Create a swap file with the specified quantization mode
+    pub fn with_quant_mode(
+        swap_dir: &Path,
+        block_size: usize,
+        kv_dim: usize,
+        quant_mode: SwapQuantMode,
+    ) -> io::Result<Self> {
         fs::create_dir_all(swap_dir)?;
         let path = swap_dir.join("paged_kv_swap.bin");
 
@@ -88,15 +152,32 @@ impl SwapFile {
             .truncate(true)
             .open(&path)?;
 
-        // Each slot: keys (f32) + values (f32) + num_filled (u32)
-        let slot_size =
-            (block_size * kv_dim * 2) * std::mem::size_of::<f32>() + std::mem::size_of::<u32>();
+        let float_count = block_size * kv_dim * 2; // keys + values
+        let n_rows = block_size * 2; // one scale per row (key row + value row)
 
+        let slot_size = match quant_mode {
+            SwapQuantMode::None => {
+                // keys (f32) + values (f32) + num_filled (u32)
+                float_count * std::mem::size_of::<f32>() + std::mem::size_of::<u32>()
+            }
+            SwapQuantMode::Int8 => {
+                // keys (i8) + values (i8) + scales (f32 per row) + num_filled (u32)
+                float_count * std::mem::size_of::<i8>()
+                    + n_rows * std::mem::size_of::<f32>()
+                    + std::mem::size_of::<u32>()
+            }
+        };
+
+        let mode_str = match quant_mode {
+            SwapQuantMode::None => "f32",
+            SwapQuantMode::Int8 => "INT8",
+        };
         info!(
-            "SSD block swap file: {:?} (slot_size={} bytes, {:.1} KB/block)",
+            "SSD block swap file: {:?} (slot_size={} bytes, {:.1} KB/block, mode={})",
             path,
             slot_size,
-            slot_size as f64 / 1024.0
+            slot_size as f64 / 1024.0,
+            mode_str,
         );
 
         Ok(Self {
@@ -110,6 +191,7 @@ impl SwapFile {
             next_offset: 0,
             total_bytes_written: 0,
             total_bytes_read: 0,
+            quant_mode,
         })
     }
 
@@ -125,23 +207,60 @@ impl SwapFile {
 
         self.file.seek(SeekFrom::Start(offset))?;
 
-        // Write keys as raw f32 bytes
-        let key_bytes = unsafe {
-            std::slice::from_raw_parts(
-                data.keys.as_ptr() as *const u8,
-                data.keys.len() * std::mem::size_of::<f32>(),
-            )
-        };
-        self.file.write_all(key_bytes)?;
+        match self.quant_mode {
+            SwapQuantMode::None => {
+                // Write keys as raw f32 bytes
+                let key_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        data.keys.as_ptr() as *const u8,
+                        data.keys.len() * std::mem::size_of::<f32>(),
+                    )
+                };
+                self.file.write_all(key_bytes)?;
 
-        // Write values as raw f32 bytes
-        let val_bytes = unsafe {
-            std::slice::from_raw_parts(
-                data.values.as_ptr() as *const u8,
-                data.values.len() * std::mem::size_of::<f32>(),
-            )
-        };
-        self.file.write_all(val_bytes)?;
+                // Write values as raw f32 bytes
+                let val_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        data.values.as_ptr() as *const u8,
+                        data.values.len() * std::mem::size_of::<f32>(),
+                    )
+                };
+                self.file.write_all(val_bytes)?;
+            }
+            SwapQuantMode::Int8 => {
+                // Quantize keys and values to INT8
+                let (q_keys, key_scales) = quantize_vectors_int8(&data.keys, self.kv_dim);
+                let (q_values, val_scales) = quantize_vectors_int8(&data.values, self.kv_dim);
+
+                // Write quantized keys (i8)
+                let key_bytes = unsafe {
+                    std::slice::from_raw_parts(q_keys.as_ptr() as *const u8, q_keys.len())
+                };
+                self.file.write_all(key_bytes)?;
+
+                // Write quantized values (i8)
+                let val_bytes = unsafe {
+                    std::slice::from_raw_parts(q_values.as_ptr() as *const u8, q_values.len())
+                };
+                self.file.write_all(val_bytes)?;
+
+                // Write scales (key scales then value scales, f32 each)
+                let scale_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        key_scales.as_ptr() as *const u8,
+                        key_scales.len() * std::mem::size_of::<f32>(),
+                    )
+                };
+                self.file.write_all(scale_bytes)?;
+                let scale_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        val_scales.as_ptr() as *const u8,
+                        val_scales.len() * std::mem::size_of::<f32>(),
+                    )
+                };
+                self.file.write_all(scale_bytes)?;
+            }
+        }
 
         // Write num_filled as u32
         self.file
@@ -170,25 +289,73 @@ impl SwapFile {
 
         let float_count = self.block_size * self.kv_dim;
 
-        // Read keys
-        let mut keys = vec![0.0f32; float_count];
-        let key_bytes = unsafe {
-            std::slice::from_raw_parts_mut(
-                keys.as_mut_ptr() as *mut u8,
-                float_count * std::mem::size_of::<f32>(),
-            )
-        };
-        self.file.read_exact(key_bytes)?;
+        let (keys, values) = match self.quant_mode {
+            SwapQuantMode::None => {
+                // Read keys
+                let mut keys = vec![0.0f32; float_count];
+                let key_bytes = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        keys.as_mut_ptr() as *mut u8,
+                        float_count * std::mem::size_of::<f32>(),
+                    )
+                };
+                self.file.read_exact(key_bytes)?;
 
-        // Read values
-        let mut values = vec![0.0f32; float_count];
-        let val_bytes = unsafe {
-            std::slice::from_raw_parts_mut(
-                values.as_mut_ptr() as *mut u8,
-                float_count * std::mem::size_of::<f32>(),
-            )
+                // Read values
+                let mut values = vec![0.0f32; float_count];
+                let val_bytes = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        values.as_mut_ptr() as *mut u8,
+                        float_count * std::mem::size_of::<f32>(),
+                    )
+                };
+                self.file.read_exact(val_bytes)?;
+
+                (keys, values)
+            }
+            SwapQuantMode::Int8 => {
+                let n_rows = self.block_size;
+
+                // Read quantized keys (i8)
+                let mut q_keys = vec![0i8; float_count];
+                let key_bytes = unsafe {
+                    std::slice::from_raw_parts_mut(q_keys.as_mut_ptr() as *mut u8, float_count)
+                };
+                self.file.read_exact(key_bytes)?;
+
+                // Read quantized values (i8)
+                let mut q_values = vec![0i8; float_count];
+                let val_bytes = unsafe {
+                    std::slice::from_raw_parts_mut(q_values.as_mut_ptr() as *mut u8, float_count)
+                };
+                self.file.read_exact(val_bytes)?;
+
+                // Read scales
+                let mut key_scales = vec![0.0f32; n_rows];
+                let scale_bytes = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        key_scales.as_mut_ptr() as *mut u8,
+                        n_rows * std::mem::size_of::<f32>(),
+                    )
+                };
+                self.file.read_exact(scale_bytes)?;
+
+                let mut val_scales = vec![0.0f32; n_rows];
+                let scale_bytes = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        val_scales.as_mut_ptr() as *mut u8,
+                        n_rows * std::mem::size_of::<f32>(),
+                    )
+                };
+                self.file.read_exact(scale_bytes)?;
+
+                // Dequantize
+                let keys = dequantize_vectors_int8(&q_keys, &key_scales, self.kv_dim);
+                let values = dequantize_vectors_int8(&q_values, &val_scales, self.kv_dim);
+
+                (keys, values)
+            }
         };
-        self.file.read_exact(val_bytes)?;
 
         // Read num_filled
         let mut num_filled_bytes = [0u8; 4];
@@ -228,6 +395,11 @@ impl SwapFile {
         &self.path
     }
 
+    /// Get the quantization mode
+    pub fn quant_mode(&self) -> SwapQuantMode {
+        self.quant_mode
+    }
+
     /// Total I/O stats
     pub fn stats(&self) -> SwapFileStats {
         SwapFileStats {
@@ -236,6 +408,7 @@ impl SwapFile {
             total_written_bytes: self.total_bytes_written,
             total_read_bytes: self.total_bytes_read,
             free_slots: self.free_slots.len(),
+            quant_mode: self.quant_mode,
         }
     }
 }
@@ -396,7 +569,28 @@ impl BlockSwapper {
         low_watermark: f64,
         min_resident: usize,
     ) -> io::Result<Self> {
-        let swap_file = SwapFile::new(swap_dir, block_size, kv_dim)?;
+        Self::with_quant_mode(
+            swap_dir,
+            block_size,
+            kv_dim,
+            high_watermark,
+            low_watermark,
+            min_resident,
+            SwapQuantMode::None,
+        )
+    }
+
+    /// Create a new block swapper with quantized SSD storage
+    pub fn with_quant_mode(
+        swap_dir: &Path,
+        block_size: usize,
+        kv_dim: usize,
+        high_watermark: f64,
+        low_watermark: f64,
+        min_resident: usize,
+        quant_mode: SwapQuantMode,
+    ) -> io::Result<Self> {
+        let swap_file = SwapFile::with_quant_mode(swap_dir, block_size, kv_dim, quant_mode)?;
         let scheduler = SwapScheduler::new(high_watermark, low_watermark, min_resident);
 
         Ok(Self {
@@ -490,6 +684,7 @@ pub struct SwapFileStats {
     pub total_written_bytes: u64,
     pub total_read_bytes: u64,
     pub free_slots: usize,
+    pub quant_mode: SwapQuantMode,
 }
 
 impl std::fmt::Display for BlockSwapStats {
@@ -504,6 +699,15 @@ impl std::fmt::Display for BlockSwapStats {
             self.total_read_bytes as f64 / (1024.0 * 1024.0),
         )
     }
+}
+
+/// Compute the compression ratio of INT8 vs f32 swap storage
+pub fn swap_compression_ratio(block_size: usize, kv_dim: usize) -> f64 {
+    let float_count = block_size * kv_dim * 2;
+    let n_rows = block_size * 2;
+    let f32_size = float_count * 4 + 4; // f32 data + num_filled
+    let int8_size = float_count + n_rows * 4 + 4; // i8 data + scales + num_filled
+    f32_size as f64 / int8_size as f64
 }
 
 #[cfg(test)]
@@ -784,5 +988,198 @@ mod tests {
         assert!(display.contains("42 blocks"));
         assert!(display.contains("100 out"));
         assert!(display.contains("80 in"));
+    }
+
+    // ── Quantized block swapping tests ──
+
+    #[test]
+    fn test_quantize_dequantize_roundtrip() {
+        let dim = 64;
+        let data: Vec<f32> = (0..dim * 4).map(|i| (i as f32 - 128.0) * 0.01).collect();
+
+        let (quantized, scales) = quantize_vectors_int8(&data, dim);
+        let recovered = dequantize_vectors_int8(&quantized, &scales, dim);
+
+        assert_eq!(recovered.len(), data.len());
+        for (a, b) in recovered.iter().zip(data.iter()) {
+            // INT8 quantization error should be small (< 1% of absmax)
+            assert!(
+                (a - b).abs() < 0.02,
+                "quantization error too large: {} vs {}",
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn test_quantize_zeros() {
+        let dim = 8;
+        let data = vec![0.0f32; dim * 2];
+        let (quantized, scales) = quantize_vectors_int8(&data, dim);
+        assert!(scales.iter().all(|&s| s == 0.0));
+        assert!(quantized.iter().all(|&q| q == 0));
+
+        let recovered = dequantize_vectors_int8(&quantized, &scales, dim);
+        assert!(recovered.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_swap_file_int8_write_read() {
+        let dir = temp_swap_dir();
+        let block_size = 4;
+        let kv_dim = 8;
+        let mut sf =
+            SwapFile::with_quant_mode(&dir, block_size, kv_dim, SwapQuantMode::Int8).unwrap();
+
+        let id = BlockId {
+            layer_idx: 0,
+            block_id: 3,
+        };
+        let data = BlockData {
+            keys: (0..block_size * kv_dim)
+                .map(|i| (i as f32 - 16.0) * 0.1)
+                .collect(),
+            values: (0..block_size * kv_dim)
+                .map(|i| (i as f32 - 16.0) * 0.05)
+                .collect(),
+            num_filled: 3,
+        };
+
+        sf.write_block(id, &data).unwrap();
+        assert!(sf.contains(&id));
+        assert_eq!(sf.quant_mode(), SwapQuantMode::Int8);
+
+        let recovered = sf.read_block(id).unwrap();
+        assert_eq!(recovered.num_filled, 3);
+        assert_eq!(recovered.keys.len(), data.keys.len());
+
+        // Allow INT8 quantization error
+        for (a, b) in recovered.keys.iter().zip(data.keys.iter()) {
+            assert!((a - b).abs() < 0.02, "key quant error: {} vs {}", a, b);
+        }
+        for (a, b) in recovered.values.iter().zip(data.values.iter()) {
+            assert!((a - b).abs() < 0.02, "value quant error: {} vs {}", a, b);
+        }
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_swap_file_int8_smaller_than_f32() {
+        let dir1 = temp_swap_dir();
+        let dir2 = temp_swap_dir();
+        let block_size = 16;
+        let kv_dim = 128;
+
+        let sf_f32 = SwapFile::new(&dir1, block_size, kv_dim).unwrap();
+        let sf_int8 =
+            SwapFile::with_quant_mode(&dir2, block_size, kv_dim, SwapQuantMode::Int8).unwrap();
+
+        // INT8 slot should be significantly smaller than f32 slot
+        assert!(
+            sf_int8.slot_size < sf_f32.slot_size,
+            "INT8 slot {} should be smaller than f32 slot {}",
+            sf_int8.slot_size,
+            sf_f32.slot_size
+        );
+
+        // Should be roughly 3-4x smaller
+        let ratio = sf_f32.slot_size as f64 / sf_int8.slot_size as f64;
+        assert!(
+            ratio > 2.5 && ratio < 4.5,
+            "compression ratio {} not in expected range [2.5, 4.5]",
+            ratio
+        );
+
+        cleanup(&dir1);
+        cleanup(&dir2);
+    }
+
+    #[test]
+    fn test_block_swapper_int8_roundtrip() {
+        let dir = temp_swap_dir();
+        let mut swapper =
+            BlockSwapper::with_quant_mode(&dir, 4, 8, 0.8, 0.5, 1, SwapQuantMode::Int8).unwrap();
+
+        let id = BlockId {
+            layer_idx: 2,
+            block_id: 5,
+        };
+        let data = BlockData {
+            keys: vec![1.5; 32],
+            values: vec![-0.75; 32],
+            num_filled: 4,
+        };
+
+        swapper.swap_out(id, &data).unwrap();
+        assert!(swapper.is_swapped(&id));
+
+        let recovered = swapper.swap_in(id).unwrap();
+        assert!(!swapper.is_swapped(&id));
+        assert_eq!(recovered.num_filled, 4);
+
+        // Check values within INT8 quantization tolerance
+        for &v in &recovered.keys {
+            assert!((v - 1.5).abs() < 0.02, "key value {} != 1.5", v);
+        }
+        for &v in &recovered.values {
+            assert!((v - (-0.75)).abs() < 0.02, "value {} != -0.75", v);
+        }
+
+        let stats = swapper.stats();
+        assert_eq!(stats.total_swap_outs, 1);
+        assert_eq!(stats.total_swap_ins, 1);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_swap_file_int8_slot_reuse() {
+        let dir = temp_swap_dir();
+        let mut sf = SwapFile::with_quant_mode(&dir, 2, 4, SwapQuantMode::Int8).unwrap();
+
+        let id1 = BlockId {
+            layer_idx: 0,
+            block_id: 0,
+        };
+        let id2 = BlockId {
+            layer_idx: 0,
+            block_id: 1,
+        };
+        let id3 = BlockId {
+            layer_idx: 0,
+            block_id: 2,
+        };
+
+        let data = BlockData {
+            keys: vec![1.0; 8],
+            values: vec![2.0; 8],
+            num_filled: 2,
+        };
+
+        sf.write_block(id1, &data).unwrap();
+        sf.write_block(id2, &data).unwrap();
+
+        let offset_before = sf.next_offset;
+        sf.free_block(id1);
+        sf.write_block(id3, &data).unwrap();
+        assert_eq!(sf.next_offset, offset_before); // Slot reused
+
+        assert!(!sf.contains(&id1));
+        assert!(sf.contains(&id2));
+        assert!(sf.contains(&id3));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_compression_ratio() {
+        let ratio = swap_compression_ratio(16, 128);
+        // With block_size=16, kv_dim=128:
+        // f32: 16*128*2*4 + 4 = 16388 bytes
+        // int8: 16*128*2*1 + 32*4 + 4 = 4228 bytes
+        // ratio ≈ 3.88
+        assert!(ratio > 3.0 && ratio < 4.5, "ratio {} unexpected", ratio);
     }
 }

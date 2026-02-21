@@ -43,6 +43,7 @@ pub struct ServerConfig {
     pub paged_kv: bool,
     pub paged_kv_blocks: usize,
     pub paged_block_size: usize,
+    pub swap_quantize: bool,
 }
 
 /// Model context shared across requests

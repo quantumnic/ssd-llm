@@ -56,6 +56,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🔧 CORS Support** — Full CORS preflight handling for browser-based clients
 - **📄 PagedAttention** — vLLM-style paged KV cache: fixed-size blocks allocated on-demand, copy-on-write for beam search/parallel sampling, near-zero memory waste, sequence forking
 - **💾 SSD Block Swapping** — Automatic swap-out of cold KV cache blocks to SSD under memory pressure, LRU-based eviction, transparent swap-in on access, prefetch support, swap file with slot reuse
+- **🗜️ Quantized Block Swapping** — INT8 per-row quantization of KV cache blocks before writing to SSD, reducing I/O bandwidth by ~4x with minimal accuracy loss, configurable via `--swap-quantize`
 - **🧮 Embeddings API** — OpenAI-compatible `/v1/embeddings` endpoint with L2-normalized vectors for RAG pipelines
 - **📋 Models Listing** — OpenAI-compatible `/v1/models` endpoint for client discovery
 - **🎭 Chat Templates** — Auto-detected formatting for Llama 2, Llama 3, Mistral, Gemma, Phi-3, ChatML, and raw mode
@@ -117,6 +118,9 @@ ssd-llm run model-70b.gguf --prompt "Hello" --tensor-parallel 4
 
 # Continuous batching server (handles 8 concurrent requests)
 ssd-llm serve model.gguf --memory-budget 8G --max-batch 8 --prompt-cache
+
+# PagedAttention with INT8-quantized SSD swapping (4x less I/O)
+ssd-llm serve model.gguf --memory-budget 8G --paged-kv --swap-quantize
 
 # Sliding window attention (bounded memory for long contexts)
 ssd-llm run model.gguf --prompt "Hello" --sliding-window 4096 --sink-tokens 4
@@ -365,6 +369,10 @@ This project builds on insights from:
 - [x] v1.12 — Vision/Multimodal support (CLIP ViT encoder for LLaVA-style image understanding)
 - [x] v1.13 — Ollama model management API (/api/show, /api/pull, /api/copy, /api/delete, /api/ps)
 - [x] v1.14 — Q3_K + Q5_K GPU dequantization, Ollama /api/embed endpoint
+- [x] v1.15 — Q2_K/Q8_K GPU dequantization — complete K-quant family on Metal
+- [x] v1.16 — PagedAttention — vLLM-style paged KV cache management
+- [x] v1.17 — SSD Block Swapping — automatic KV cache page swapping to SSD
+- [x] v1.18 — Quantized Block Swapping — INT8 compression for 4x less SSD I/O
 
 ## Requirements
 

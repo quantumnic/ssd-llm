@@ -46,6 +46,7 @@ pub struct InferenceConfig {
     pub mmap_kv: bool,
     pub flash_attention: bool,
     pub kv_quantize: bool,
+    pub swap_quantize: bool,
     pub tfs_z: f32,
     pub mirostat: u8,
     pub mirostat_tau: f32,
@@ -85,6 +86,7 @@ impl Default for Config {
                 mmap_kv: false,
                 flash_attention: false,
                 kv_quantize: false,
+                swap_quantize: false,
                 tfs_z: 0.0,
                 mirostat: 0,
                 mirostat_tau: 5.0,
@@ -177,6 +179,9 @@ impl Config {
                 "inference.kv_quantize" => {
                     config.inference.kv_quantize = value == "true";
                 }
+                "inference.swap_quantize" => {
+                    config.inference.swap_quantize = value == "true";
+                }
                 "inference.tfs_z" => {
                     config.inference.tfs_z = value.parse().unwrap_or(0.0);
                 }
@@ -221,6 +226,7 @@ sliding_window = 0
 mmap_kv = false
 prompt_cache = false
 kv_quantize = false
+swap_quantize = false
 tfs_z = 0.0
 mirostat = 0
 mirostat_tau = 5.0
