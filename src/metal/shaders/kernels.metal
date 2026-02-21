@@ -604,3 +604,106 @@ kernel void matvec_q8_0(
 
     y[tid] = sum;
 }
+
+// IQ4_NL non-linear lookup table
+constant char iq4nl_lut[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10,
+    1, 13, 25, 38, 53, 69, 89, 113
+};
+
+// IQ4_NL dequant matvec: 32 elements/block, 18 bytes (f16 d + 16B qs)
+kernel void matvec_iq4_nl(
+    device const uchar* W_quantized [[buffer(0)]],
+    device const float* x           [[buffer(1)]],
+    device float* y                 [[buffer(2)]],
+    device const uint* out_dim_buf  [[buffer(3)]],
+    device const uint* in_dim_buf   [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    uint out_dim = out_dim_buf[0];
+    uint in_dim  = in_dim_buf[0];
+    if (tid >= out_dim) return;
+
+    uint block_size = 32;
+    uint block_bytes = 18;
+    uint blocks_per_row = in_dim / block_size;
+    uint row_offset = tid * blocks_per_row * block_bytes;
+
+    float sum = 0.0;
+
+    for (uint b = 0; b < blocks_per_row; b++) {
+        uint boff = row_offset + b * block_bytes;
+
+        ushort d_bits = ushort(W_quantized[boff]) | (ushort(W_quantized[boff + 1]) << 8);
+        float d = float(as_type<half>(d_bits));
+
+        uint x_base = b * block_size;
+        for (uint j = 0; j < 16; j++) {
+            uchar byte = W_quantized[boff + 2 + j];
+            uchar lo = byte & 0x0F;
+            uchar hi = (byte >> 4) & 0x0F;
+            sum += d * float(iq4nl_lut[lo]) * x[x_base + 2 * j];
+            sum += d * float(iq4nl_lut[hi]) * x[x_base + 2 * j + 1];
+        }
+    }
+
+    y[tid] = sum;
+}
+
+// IQ4_XS dequant matvec: 256 elements/block, 148 bytes
+// Layout: f16 d (2B) + u16 scales_h (2B) + 8x u16 scales_l (16B) + 128B qs
+kernel void matvec_iq4_xs(
+    device const uchar* W_quantized [[buffer(0)]],
+    device const float* x           [[buffer(1)]],
+    device float* y                 [[buffer(2)]],
+    device const uint* out_dim_buf  [[buffer(3)]],
+    device const uint* in_dim_buf   [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    uint out_dim = out_dim_buf[0];
+    uint in_dim  = in_dim_buf[0];
+    if (tid >= out_dim) return;
+
+    uint block_size = 256;
+    uint block_bytes = 148;
+    uint blocks_per_row = in_dim / block_size;
+    uint row_offset = tid * blocks_per_row * block_bytes;
+
+    float sum = 0.0;
+
+    for (uint b = 0; b < blocks_per_row; b++) {
+        uint boff = row_offset + b * block_bytes;
+
+        ushort d_bits = ushort(W_quantized[boff]) | (ushort(W_quantized[boff + 1]) << 8);
+        float d = float(as_type<half>(d_bits));
+
+        ushort scales_h = ushort(W_quantized[boff + 2]) | (ushort(W_quantized[boff + 3]) << 8);
+
+        for (uint sb = 0; sb < 8; sb++) {
+            // Extract 6-bit scale: 4 low bits from scales_l nibbles, 2 high bits from scales_h
+            uint sl_idx = sb / 2;
+            ushort sl_word = ushort(W_quantized[boff + 4 + sl_idx * 2]) | (ushort(W_quantized[boff + 5 + sl_idx * 2]) << 8);
+            int sl;
+            if (sb % 2 == 0) {
+                sl = int(sl_word & 0x0F);
+            } else {
+                sl = int((sl_word >> 4) & 0x0F);
+            }
+            int sh = int((scales_h >> (2 * sb)) & 0x03);
+            float scale = float((sl | (sh << 4)) - 32);
+
+            uint qs_off = boff + 20 + sb * 16;
+            uint x_base = b * block_size + sb * 32;
+
+            for (uint j = 0; j < 16; j++) {
+                uchar byte = W_quantized[qs_off + j];
+                uchar lo = byte & 0x0F;
+                uchar hi = (byte >> 4) & 0x0F;
+                sum += d * scale * float(iq4nl_lut[lo]) * x[x_base + 2 * j];
+                sum += d * scale * float(iq4nl_lut[hi]) * x[x_base + 2 * j + 1];
+            }
+        }
+    }
+
+    y[tid] = sum;
+}

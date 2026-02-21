@@ -36,6 +36,8 @@ struct GpuPipelines {
     matvec_q2_k: ComputePipelineState,
     matvec_q8_k: ComputePipelineState,
     matvec_q8_0: ComputePipelineState,
+    matvec_iq4_nl: ComputePipelineState,
+    matvec_iq4_xs: ComputePipelineState,
     rmsnorm_sumsq: ComputePipelineState,
     rmsnorm_normalize: ComputePipelineState,
     softmax_exp: ComputePipelineState,
@@ -103,6 +105,8 @@ impl MetalGpu {
             matvec_q8_0: make_pipeline("matvec_q8_0")?,
             matvec_q2_k: make_pipeline("matvec_q2_k")?,
             matvec_q8_k: make_pipeline("matvec_q8_k")?,
+            matvec_iq4_nl: make_pipeline("matvec_iq4_nl")?,
+            matvec_iq4_xs: make_pipeline("matvec_iq4_xs")?,
             rmsnorm_sumsq: make_pipeline("rmsnorm_sumsq")?,
             rmsnorm_normalize: make_pipeline("rmsnorm_normalize")?,
             softmax_exp: make_pipeline("softmax_exp")?,
@@ -392,6 +396,18 @@ impl MetalGpu {
     #[cfg(target_os = "macos")]
     pub fn matvec_q8_k(&self, w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
         self.dispatch_quantized_matvec(&self.pipelines.matvec_q8_k, w, x, out_dim, in_dim)
+    }
+
+    /// GPU quantized matvec dispatch for IQ4_NL
+    #[cfg(target_os = "macos")]
+    pub fn matvec_iq4_nl(&self, w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+        self.dispatch_quantized_matvec(&self.pipelines.matvec_iq4_nl, w, x, out_dim, in_dim)
+    }
+
+    /// GPU quantized matvec dispatch for IQ4_XS
+    #[cfg(target_os = "macos")]
+    pub fn matvec_iq4_xs(&self, w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+        self.dispatch_quantized_matvec(&self.pipelines.matvec_iq4_xs, w, x, out_dim, in_dim)
     }
 
     /// Generic dispatch for quantized matvec kernels

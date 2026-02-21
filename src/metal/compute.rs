@@ -174,6 +174,8 @@ impl MetalCompute {
                     GgmlType::Q8_0 => return gpu.matvec_q8_0(w_raw, x, out_dim, in_dim),
                     GgmlType::Q2K => return gpu.matvec_q2_k(w_raw, x, out_dim, in_dim),
                     GgmlType::Q8K => return gpu.matvec_q8_k(w_raw, x, out_dim, in_dim),
+                    GgmlType::IQ4NL => return gpu.matvec_iq4_nl(w_raw, x, out_dim, in_dim),
+                    GgmlType::IQ4XS => return gpu.matvec_iq4_xs(w_raw, x, out_dim, in_dim),
                     _ => {}
                 }
             }
@@ -325,6 +327,8 @@ pub fn matvec_quantized_cpu(
         GgmlType::Q8_0 => matvec_q8_0_cpu(w_raw, x, out_dim, in_dim),
         GgmlType::Q2K => matvec_q2_k_cpu(w_raw, x, out_dim, in_dim),
         GgmlType::Q8K => matvec_q8_k_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::IQ4NL => matvec_iq4_nl_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::IQ4XS => matvec_iq4_xs_cpu(w_raw, x, out_dim, in_dim),
         _ => {
             debug!("Unsupported quant type {:?}, returning zeros", dtype);
             vec![0.0; out_dim]
@@ -648,6 +652,90 @@ fn matvec_q8_k_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f3
     y
 }
 
+/// IQ4_NL non-linear lookup table (from llama.cpp ggml-quants.c)
+/// Maps 4-bit indices (0..15) to non-linearly spaced dequantized values.
+const IQ4_NL_QUANTS: [i8; 16] = [
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+];
+
+/// CPU IQ4_NL dequant matvec
+/// Block layout (32 elements, 18 bytes):
+///   f16 d (2B) + 16B qs (4-bit indices into IQ4_NL_QUANTS)
+fn matvec_iq4_nl_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let block_size = 32usize;
+    let block_bytes = 18usize;
+    let blocks_per_row = in_dim / block_size;
+    let mut y = vec![0.0f32; out_dim];
+
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * blocks_per_row * block_bytes;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_row {
+            let boff = row_off + b * block_bytes;
+            let d = f16_to_f32(w[boff], w[boff + 1]);
+            let x_base = b * block_size;
+            for j in 0..16 {
+                let byte = w[boff + 2 + j];
+                let lo = (byte & 0x0F) as usize;
+                let hi = ((byte >> 4) & 0x0F) as usize;
+                sum += d * IQ4_NL_QUANTS[lo] as f32 * x[x_base + 2 * j];
+                sum += d * IQ4_NL_QUANTS[hi] as f32 * x[x_base + 2 * j + 1];
+            }
+        }
+        *y_val = sum;
+    }
+    y
+}
+
+/// CPU IQ4_XS dequant matvec
+/// Block layout (256 elements, 148 bytes):
+///   f16 d (2B) + u16 scales_h (2B) + 8×u16 scales_l (16B) + 128B qs
+/// Each sub-block of 32 elements has a 6-bit scale (low 4 bits from scales_l, high 2 bits from scales_h).
+fn matvec_iq4_xs_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let block_size = 256usize;
+    let block_bytes = 148usize;
+    let blocks_per_row = in_dim / block_size;
+    let mut y = vec![0.0f32; out_dim];
+
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * blocks_per_row * block_bytes;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_row {
+            let boff = row_off + b * block_bytes;
+            let d = f16_to_f32(w[boff], w[boff + 1]);
+            let scales_h = u16::from_le_bytes([w[boff + 2], w[boff + 3]]);
+
+            // 8 sub-blocks of 32 elements each
+            for sb in 0..8 {
+                // Low 4 bits of scale from scales_l (packed as nibbles in u16s)
+                let sl_idx = sb / 2;
+                let sl_word =
+                    u16::from_le_bytes([w[boff + 4 + sl_idx * 2], w[boff + 5 + sl_idx * 2]]);
+                let sl = if sb % 2 == 0 {
+                    (sl_word & 0x0F) as i32
+                } else {
+                    ((sl_word >> 4) & 0x0F) as i32
+                };
+                // High 2 bits from scales_h
+                let sh = ((scales_h >> (2 * sb)) & 0x03) as i32;
+                let scale = (sl | (sh << 4)) as f32 - 32.0;
+
+                let qs_off = boff + 20 + sb * 16; // 20 = 2 + 2 + 16 header
+                let x_base = b * block_size + sb * 32;
+                for j in 0..16 {
+                    let byte = w[qs_off + j];
+                    let lo = (byte & 0x0F) as usize;
+                    let hi = ((byte >> 4) & 0x0F) as usize;
+                    sum += d * scale * IQ4_NL_QUANTS[lo] as f32 * x[x_base + 2 * j];
+                    sum += d * scale * IQ4_NL_QUANTS[hi] as f32 * x[x_base + 2 * j + 1];
+                }
+            }
+        }
+        *y_val = sum;
+    }
+    y
+}
+
 /// Convert two bytes (little-endian) to f32 via f16
 #[inline]
 fn f16_to_f32(lo: u8, hi: u8) -> f32 {
@@ -929,6 +1017,189 @@ mod tests {
         let bits = half::f16::from_f32(3.14).to_bits();
         let result = f16_to_f32(bits as u8, (bits >> 8) as u8);
         assert!((result - 3.14).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_matvec_iq4_nl_cpu_basic() {
+        // 1 row, 32 elements = 1 block, 18 bytes
+        let mut block = vec![0u8; 18];
+        // d = 1.0 as f16
+        let d_bits = half::f16::from_f32(1.0).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        // All qs = 0x00 → lo=0, hi=0 → both map to IQ4_NL_QUANTS[0] = -127
+        for j in 0..16 {
+            block[2 + j] = 0x00;
+        }
+        let x = vec![1.0f32; 32];
+        let y = matvec_iq4_nl_cpu(&block, &x, 1, 32);
+        let expected = 1.0 * -127.0 * 32.0;
+        assert!(
+            (y[0] - expected).abs() < 1.0,
+            "Expected {}, got {}",
+            expected,
+            y[0]
+        );
+    }
+
+    #[test]
+    fn test_matvec_iq4_nl_cpu_lut_values() {
+        // Verify lookup table mapping: index 8 → +1, index 15 → +113
+        let mut block = vec![0u8; 18];
+        let d_bits = half::f16::from_f32(0.5).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        // First byte: lo=8 (val=1), hi=15 (val=113)
+        block[2] = 0xF8; // hi=15, lo=8
+                         // Rest are 0
+        let mut x = vec![0.0f32; 32];
+        x[0] = 1.0; // multiplied by LUT[8]=1
+        x[1] = 1.0; // multiplied by LUT[15]=113
+        let y = matvec_iq4_nl_cpu(&block, &x, 1, 32);
+        let expected = 0.5 * (1.0 + 113.0);
+        assert!(
+            (y[0] - expected).abs() < 0.5,
+            "Expected {}, got {}",
+            expected,
+            y[0]
+        );
+    }
+
+    #[test]
+    fn test_matvec_iq4_nl_cpu_two_rows() {
+        // 2 rows × 32 elements = 2 blocks
+        let mut data = vec![0u8; 36]; // 2 × 18 bytes
+        let d1 = half::f16::from_f32(1.0).to_bits();
+        let d2 = half::f16::from_f32(2.0).to_bits();
+        data[0] = d1 as u8;
+        data[1] = (d1 >> 8) as u8;
+        // index 8 = +1 for all
+        for j in 0..16 {
+            data[2 + j] = 0x88;
+        }
+        data[18] = d2 as u8;
+        data[19] = (d2 >> 8) as u8;
+        for j in 0..16 {
+            data[20 + j] = 0x88;
+        }
+        let x = vec![1.0f32; 32];
+        let y = matvec_iq4_nl_cpu(&data, &x, 2, 32);
+        // IQ4_NL_QUANTS[8] = 1, so row0 = 1.0 * 1 * 32 = 32, row1 = 2.0 * 1 * 32 = 64
+        assert!(
+            (y[0] - 32.0).abs() < 1.0,
+            "Row 0: expected 32.0, got {}",
+            y[0]
+        );
+        assert!(
+            (y[1] - 64.0).abs() < 1.0,
+            "Row 1: expected 64.0, got {}",
+            y[1]
+        );
+    }
+
+    #[test]
+    fn test_matvec_iq4_xs_cpu_basic() {
+        // 1 row, 256 elements = 1 block, 148 bytes
+        let mut block = vec![0u8; 148];
+        let d_bits = half::f16::from_f32(1.0).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        // scales_h = 0 (all high bits zero)
+        block[2] = 0;
+        block[3] = 0;
+        // scales_l: we want scale = (sl | sh<<4) - 32 = sl - 32
+        // Set sl = 33 (nibble = 1 for even sub-blocks) so scale = 33 - 32 = 1
+        // Actually for simplicity set all scales_l words so each nibble = 0
+        // Then scale = (0 | 0) - 32 = -32
+        // Set all qs to index 8 (val=1): byte = 0x88
+        for j in 0..16 {
+            block[4 + j] = 0x00; // scales_l all 0
+        }
+        for j in 0..128 {
+            block[20 + j] = 0x88; // all index 8 → IQ4_NL_QUANTS[8] = 1
+        }
+        let x = vec![1.0f32; 256];
+        let y = matvec_iq4_xs_cpu(&block, &x, 1, 256);
+        // Each element: d * scale * 1 = 1.0 * (-32) * 1 = -32, total = -32 * 256
+        let expected = 1.0 * -32.0 * 256.0;
+        assert!(
+            (y[0] - expected).abs() < 10.0,
+            "Expected {}, got {}",
+            expected,
+            y[0]
+        );
+    }
+
+    #[test]
+    fn test_matvec_iq4_xs_cpu_positive_scale() {
+        // Set scales so scale = 1.0 (sl=1, sh=2 → 1 | 8 = 33 - 32 = 1)
+        let mut block = vec![0u8; 148];
+        let d_bits = half::f16::from_f32(0.01).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        // scales_h: sh=2 for all sub-blocks → bit pairs = 10
+        // Sub-block 0: bits 1:0 = 2, sub-block 1: bits 3:2 = 2, etc.
+        // = 0b10_10_10_10_10_10_10_10 = 0xAAAA
+        block[2] = 0xAA;
+        block[3] = 0xAA;
+        // scales_l: sl=1 for all nibbles
+        // Each u16 word: nibble0=1, nibble1=1 → 0x0011
+        for i in 0..8 {
+            block[4 + i * 2] = 0x11;
+            block[5 + i * 2] = 0x00;
+        }
+        // qs: all index 8 → val=1
+        for j in 0..128 {
+            block[20 + j] = 0x88;
+        }
+        let x = vec![1.0f32; 256];
+        let y = matvec_iq4_xs_cpu(&block, &x, 1, 256);
+        // scale = (1 | (2<<4)) - 32 = 33 - 32 = 1
+        // Each element: 0.01 * 1 * 1 = 0.01, total ≈ 0.01 * 256 = 2.56
+        assert!((y[0] - 2.56).abs() < 0.5, "Expected ~2.56, got {}", y[0]);
+    }
+
+    #[test]
+    fn test_iq4_nl_lut_symmetry() {
+        // LUT has 16 entries from -127 to +113, roughly symmetric around 0
+        assert_eq!(IQ4_NL_QUANTS[0], -127);
+        assert_eq!(IQ4_NL_QUANTS[15], 113);
+        assert_eq!(IQ4_NL_QUANTS[8], 1); // close to 0 crossing
+    }
+
+    #[test]
+    fn test_matvec_iq4_nl_cpu_dispatch() {
+        // Test through the dispatch function
+        let mut block = vec![0u8; 18];
+        let d_bits = half::f16::from_f32(1.0).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        for j in 0..16 {
+            block[2 + j] = 0x88; // all index 8 → val=1
+        }
+        let x = vec![1.0f32; 32];
+        let y = matvec_quantized_cpu(&block, &x, 1, 32, GgmlType::IQ4NL);
+        assert!((y[0] - 32.0).abs() < 1.0, "Expected ~32.0, got {}", y[0]);
+    }
+
+    #[test]
+    fn test_matvec_iq4_xs_cpu_dispatch() {
+        let mut block = vec![0u8; 148];
+        let d_bits = half::f16::from_f32(0.01).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        block[2] = 0xAA;
+        block[3] = 0xAA;
+        for i in 0..8 {
+            block[4 + i * 2] = 0x11;
+            block[5 + i * 2] = 0x00;
+        }
+        for j in 0..128 {
+            block[20 + j] = 0x88;
+        }
+        let x = vec![1.0f32; 256];
+        let y = matvec_quantized_cpu(&block, &x, 1, 256, GgmlType::IQ4XS);
+        assert!((y[0] - 2.56).abs() < 0.5, "Expected ~2.56, got {}", y[0]);
     }
 
     #[test]

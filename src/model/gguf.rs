@@ -93,6 +93,8 @@ impl GgmlType {
             Self::Q5_0 | Self::Q5_1 => 32,
             Self::Q8_0 | Self::Q8_1 => 32,
             Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K | Self::Q8K => 256,
+            Self::IQ4NL => 32,
+            Self::IQ4XS => 256,
             _ => 32, // sensible default
         }
     }
@@ -115,6 +117,8 @@ impl GgmlType {
             Self::Q5K => 2 + 2 + 12 + 256 / 8 + 256 / 2,
             Self::Q6K => 256 / 2 + 256 / 4 + 256 / 16 + 2,
             Self::Q8K => 4 + 256 + 16 * 2, // f32 d + 256B qs + 16×i16 bsums = 292
+            Self::IQ4NL => 2 + 16,         // f16 d + 16B qs (4-bit indices into non-linear LUT)
+            Self::IQ4XS => 2 + 2 + 128 + 16, // f16 d + u16 scales_h + 128B qs + 8×u16 scales_l = 148
             Self::I64 | Self::F64 => 8,
             _ => 2, // fallback
         }
