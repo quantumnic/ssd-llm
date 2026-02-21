@@ -360,6 +360,9 @@ This project builds on insights from:
 - [x] v1.9 — Function calling / Tool use (OpenAI-compatible, multi-turn, parallel calls)
 - [x] v1.10 — Mixture of Experts (MoE) — sparse expert routing for Mixtral-style models
 - [x] v1.11 — GBNF grammar-constrained generation for arbitrary structured output
+- [x] v1.12 — Vision/Multimodal support (CLIP ViT encoder for LLaVA-style image understanding)
+- [x] v1.13 — Ollama model management API (/api/show, /api/pull, /api/copy, /api/delete, /api/ps)
+- [x] v1.14 — Q3_K + Q5_K GPU dequantization, Ollama /api/embed endpoint
 
 ## Requirements
 

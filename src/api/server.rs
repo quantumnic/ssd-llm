@@ -1,5 +1,6 @@
 //! Ollama-compatible HTTP API server
 //!
+//! v1.14: Ollama /api/embed endpoint for embeddings.
 //! v1.13: Full Ollama model management API (show/pull/copy/delete/ps).
 //! v0.4: Added streaming responses (chunked transfer encoding).
 //! Implements the Ollama REST API for drop-in compatibility:
@@ -65,7 +66,7 @@ impl ApiServer {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let listener = TcpListener::bind(&addr)?;
         info!("ssd-llm API server listening on http://{}", addr);
-        info!("Ollama-compatible API: POST /api/generate, /api/chat, /api/show, /api/pull, /api/copy, DELETE /api/delete, GET /api/tags, /api/ps");
+        info!("Ollama-compatible API: POST /api/generate, /api/chat, /api/embed, /api/show, /api/pull, /api/copy, DELETE /api/delete, GET /api/tags, /api/ps");
         info!(
             "OpenAI-compatible API: POST /v1/chat/completions, POST /v1/embeddings, GET /v1/models"
         );
@@ -201,6 +202,7 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("POST", "/api/chat") => handle_chat(&mut stream, ctx, &body_str),
         ("POST", "/api/show") => handle_show(&mut stream, ctx),
         ("POST", "/api/pull") => handle_pull(&mut stream, &body_str),
+        ("POST", "/api/embed") => handle_ollama_embed(&mut stream, ctx, &body_str),
         ("POST", "/api/copy") => handle_copy(&mut stream, &body_str),
         ("DELETE", "/api/delete") => handle_api_delete(&mut stream, &body_str),
         ("GET", "/api/ps") => handle_ps(&mut stream, ctx),
@@ -213,7 +215,7 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("GET", "/") => send_json_response(
             &mut stream,
             200,
-            r#"{"status":"ssd-llm is running","version":"1.13.0"}"#,
+            r#"{"status":"ssd-llm is running","version":"1.14.0"}"#,
         ),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
@@ -240,6 +242,69 @@ fn handle_show(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result
     );
     let json = crate::api::ollama_manage::model_info_to_json(&info);
     send_json_response(stream, 200, &json)
+}
+
+/// Ollama-compatible /api/embed endpoint
+/// Accepts: {"model": "...", "input": "text"} or {"model": "...", "input": ["text1", "text2"]}
+fn handle_ollama_embed(
+    stream: &mut TcpStream,
+    ctx: &Arc<Mutex<ModelContext>>,
+    body: &str,
+) -> Result<()> {
+    // Extract input(s) — reuse the OpenAI input parser
+    let inputs = extract_embedding_inputs(body);
+    if inputs.is_empty() {
+        return send_json_response(
+            stream,
+            400,
+            r#"{"error":"'input' is required (string or array of strings)"}"#,
+        );
+    }
+
+    let mut ctx = ctx.lock().unwrap();
+    let ModelContext {
+        ref gguf,
+        ref streamer,
+        ref mut cache,
+        ref model_name,
+        ..
+    } = *ctx;
+
+    let mut embeddings = Vec::new();
+    let mut total_tokens = 0usize;
+
+    for input in &inputs {
+        match transformer::embed(gguf, streamer, cache, input, true) {
+            Ok(result) => {
+                total_tokens += result.prompt_tokens;
+                embeddings.push(
+                    result
+                        .embedding
+                        .iter()
+                        .map(|v| format!("{:.8}", v))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
+            Err(e) => {
+                let resp = format!(
+                    r#"{{"error":"embedding failed: {}"}}"#,
+                    escape_json(&e.to_string())
+                );
+                return send_json_response(stream, 500, &resp);
+            }
+        }
+    }
+
+    // Ollama format: {"model":"...","embeddings":[[...],[...]],...}
+    let emb_arrays: Vec<String> = embeddings.iter().map(|e| format!("[{}]", e)).collect();
+    let resp = format!(
+        r#"{{"model":"{}","embeddings":[{}],"total_duration":0,"load_duration":0,"prompt_eval_count":{}}}"#,
+        model_name,
+        emb_arrays.join(","),
+        total_tokens,
+    );
+    send_json_response(stream, 200, &resp)
 }
 
 fn handle_pull(stream: &mut TcpStream, body: &str) -> Result<()> {
@@ -902,6 +967,24 @@ mod tests {
         let json = r#"{"input": ["only one"]}"#;
         let inputs = extract_embedding_inputs(json);
         assert_eq!(inputs, vec!["only one"]);
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_ollama_format() {
+        // Ollama /api/embed uses the same "input" field
+        let json = r#"{"model": "llama3", "input": "Why is the sky blue?"}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs, vec!["Why is the sky blue?"]);
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_ollama_batch() {
+        let json =
+            r#"{"model": "llama3", "input": ["Why is the sky blue?", "Why is the grass green?"]}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0], "Why is the sky blue?");
+        assert_eq!(inputs[1], "Why is the grass green?");
     }
 }
 

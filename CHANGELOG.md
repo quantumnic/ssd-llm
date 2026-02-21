@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.14.0 — Q3_K/Q5_K GPU Dequantization + Ollama Embeddings API (2026-02-21)
+
+### Added
+- **Q3_K dequantization**: Full CPU and Metal GPU dequant-matvec for Q3_K quantized tensors (3-bit K-quant, 110B per 256-element block)
+- **Q5_K dequantization**: Full CPU and Metal GPU dequant-matvec for Q5_K quantized tensors (5-bit K-quant, 176B per 256-element block)
+- **Metal shaders**: `matvec_q3_k` and `matvec_q5_k` GPU kernels with on-the-fly dequantization for Apple Silicon acceleration
+- **GPU dispatch**: Automatic Metal GPU dispatch for Q3_K and Q5_K (joins existing Q4_0, Q4_K, Q6_K, Q8_0)
+- **Ollama `/api/embed` endpoint**: Ollama-compatible embeddings API — single string or batch array input, returns embeddings in Ollama format
+- **6 new tests**: Q3_K/Q5_K CPU dequant (basic + nonzero), Ollama embed input parsing (262 total, all passing)
+
+### Why Q3_K/Q5_K Matter
+Q3_K and Q5_K are among the most popular quantization levels for running large models on constrained hardware. Q3_K enables running 70B+ models in ~30GB, while Q5_K provides near-FP16 quality at half the size. With GPU dequantization, these formats now run at full Metal-accelerated speed instead of falling back to CPU. ssd-llm now supports the complete K-quant family on GPU: Q3_K, Q4_K, Q5_K, Q6_K.
+
+### Why Ollama /api/embed Matters
+The Ollama `/api/embed` endpoint completes the embedding API coverage — ssd-llm now serves embeddings via both OpenAI (`/v1/embeddings`) and Ollama (`/api/embed`) formats. This enables drop-in compatibility with RAG frameworks, vector databases, and embedding pipelines that target either API.
+
+### Changed
+- `matvec_quantized` dispatch now routes Q3_K and Q5_K to GPU when Metal is available
+- `matvec_quantized_cpu` dispatch now handles Q3_K and Q5_K (previously returned zeros)
+- Server startup log includes `/api/embed` in Ollama endpoint listing
+- Cargo.toml version bumped to 1.14.0
+
 ## v1.12.0 — Vision/Multimodal Support (2026-02-20)
 
 ### Added
