@@ -18,7 +18,10 @@
 //! ```
 
 use std::collections::{HashMap, VecDeque};
-use tracing::{debug, info};
+use std::path::Path;
+use tracing::{debug, info, warn};
+
+use crate::ssd::block_swap::{BlockData, BlockId, BlockSwapStats, BlockSwapper};
 
 /// Number of token positions stored per page/block
 pub const DEFAULT_BLOCK_SIZE: usize = 16;
@@ -586,6 +589,356 @@ impl PagedKvCache {
     pub fn num_sequences(&self) -> usize {
         self.sequences.len()
     }
+
+    /// Number of layers
+    pub fn n_layers(&self) -> usize {
+        self.n_layers
+    }
+
+    /// Number of KV heads
+    pub fn n_kv_heads(&self) -> usize {
+        self.n_kv_heads
+    }
+
+    /// Head dimension
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    /// Block size
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    /// Extract block data for swapping out
+    pub fn extract_block_data(&self, layer_idx: usize, block_id: usize) -> BlockData {
+        let block = self.allocators[layer_idx].block(block_id);
+        BlockData {
+            keys: block.keys.clone(),
+            values: block.values.clone(),
+            num_filled: block.num_filled,
+        }
+    }
+
+    /// Restore block data after swapping in
+    pub fn restore_block_data(&mut self, layer_idx: usize, block_id: usize, data: &BlockData) {
+        let block = self.allocators[layer_idx].block_mut(block_id);
+        block.keys.copy_from_slice(&data.keys);
+        block.values.copy_from_slice(&data.values);
+        block.num_filled = data.num_filled;
+        block.swapped = false;
+    }
+
+    /// Mark a block as swapped to SSD (data cleared from RAM)
+    pub fn mark_swapped(&mut self, layer_idx: usize, block_id: usize) {
+        let block = self.allocators[layer_idx].block_mut(block_id);
+        // Zero out the data to free effective memory (Vec keeps allocation)
+        block.keys.fill(0.0);
+        block.values.fill(0.0);
+        block.swapped = true;
+    }
+
+    /// Check if a block is swapped
+    pub fn is_block_swapped(&self, layer_idx: usize, block_id: usize) -> bool {
+        self.allocators[layer_idx].block(block_id).swapped
+    }
+
+    /// Get all block IDs for a sequence (for swap tracking)
+    pub fn sequence_block_ids(&self, seq_id: SeqId) -> Result<Vec<BlockId>, PagedAttentionError> {
+        let seq = self
+            .sequences
+            .get(&seq_id)
+            .ok_or(PagedAttentionError::UnknownSequence(seq_id))?;
+        let mut ids = Vec::new();
+        for (layer_idx, bt) in seq.block_tables.iter().enumerate() {
+            for &block_id in &bt.block_ids {
+                ids.push(BlockId {
+                    layer_idx,
+                    block_id,
+                });
+            }
+        }
+        Ok(ids)
+    }
+}
+
+/// Swap-aware paged KV cache that integrates SSD block swapping
+pub struct SwapAwarePagedKvCache {
+    /// The underlying paged KV cache
+    pub cache: PagedKvCache,
+    /// Block swapper for SSD I/O
+    swapper: Option<BlockSwapper>,
+}
+
+impl SwapAwarePagedKvCache {
+    /// Create a swap-aware paged KV cache
+    pub fn new(
+        n_layers: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        block_size: usize,
+        max_blocks_per_layer: usize,
+        swap_dir: Option<&Path>,
+    ) -> Self {
+        let cache = PagedKvCache::new(
+            n_layers,
+            n_kv_heads,
+            head_dim,
+            block_size,
+            max_blocks_per_layer,
+        );
+
+        let swapper = swap_dir.and_then(|dir| {
+            let kv_dim = n_kv_heads * head_dim;
+            match BlockSwapper::new(dir, block_size, kv_dim, 0.9, 0.7, 4) {
+                Ok(s) => {
+                    info!("SSD block swapping enabled at {:?}", dir);
+                    Some(s)
+                }
+                Err(e) => {
+                    warn!("Failed to initialize SSD block swapping: {}", e);
+                    None
+                }
+            }
+        });
+
+        Self { cache, swapper }
+    }
+
+    /// Add a sequence (delegates to inner cache)
+    pub fn add_sequence(&mut self) -> SeqId {
+        self.cache.add_sequence()
+    }
+
+    /// Append KV data, with automatic swap-out if memory pressure is high
+    pub fn append(
+        &mut self,
+        seq_id: SeqId,
+        layer_idx: usize,
+        key: &[f32],
+        value: &[f32],
+    ) -> Result<(), PagedAttentionError> {
+        // Try normal append first
+        match self.cache.append(seq_id, layer_idx, key, value) {
+            Ok(()) => {
+                // Track block access for LRU
+                if let Some(ref mut swapper) = self.swapper {
+                    if let Ok(seq) = self.cache.sequence_block_ids(seq_id) {
+                        if let Some(last) = seq.iter().rfind(|b| b.layer_idx == layer_idx) {
+                            swapper.touch(*last);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(PagedAttentionError::OutOfBlocks) => {
+                // Try to free blocks by swapping to SSD
+                if self.try_swap_out_blocks()? {
+                    // Retry append
+                    self.cache.append(seq_id, layer_idx, key, value)
+                } else {
+                    Err(PagedAttentionError::OutOfBlocks)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Try to swap out cold blocks to SSD, returns true if any blocks were freed
+    fn try_swap_out_blocks(&mut self) -> Result<bool, PagedAttentionError> {
+        let swapper = match self.swapper.as_mut() {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+
+        let stats = self.cache.stats();
+        let candidates = swapper
+            .get_swap_out_candidates(stats.total_blocks_per_layer, stats.used_blocks_per_layer);
+
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+
+        let mut freed = 0;
+        for block_id in &candidates {
+            // Skip blocks with ref_count > 1 (shared via CoW)
+            if self
+                .cache
+                .is_block_swapped(block_id.layer_idx, block_id.block_id)
+            {
+                continue;
+            }
+
+            let data = self
+                .cache
+                .extract_block_data(block_id.layer_idx, block_id.block_id);
+            if let Err(e) = swapper.swap_out(*block_id, &data) {
+                warn!("Failed to swap out block {}: {}", block_id, e);
+                continue;
+            }
+            self.cache
+                .mark_swapped(block_id.layer_idx, block_id.block_id);
+            freed += 1;
+        }
+
+        debug!("Swapped {} blocks to SSD", freed);
+        Ok(freed > 0)
+    }
+
+    /// Ensure a block is in RAM (swap in from SSD if needed)
+    pub fn ensure_resident(
+        &mut self,
+        layer_idx: usize,
+        block_id: usize,
+    ) -> Result<(), PagedAttentionError> {
+        if !self.cache.is_block_swapped(layer_idx, block_id) {
+            return Ok(());
+        }
+
+        let id = BlockId {
+            layer_idx,
+            block_id,
+        };
+        let swapper = self
+            .swapper
+            .as_mut()
+            .ok_or(PagedAttentionError::OutOfBlocks)?;
+
+        let data = swapper.swap_in(id).map_err(|e| {
+            warn!("Failed to swap in block {}: {}", id, e);
+            PagedAttentionError::OutOfBlocks
+        })?;
+
+        self.cache.restore_block_data(layer_idx, block_id, &data);
+        debug!("Swapped in block {} from SSD", id);
+        Ok(())
+    }
+
+    /// Read key with automatic swap-in
+    pub fn key_at(
+        &mut self,
+        seq_id: SeqId,
+        layer_idx: usize,
+        position: usize,
+        kv_head: usize,
+    ) -> Result<Vec<f32>, PagedAttentionError> {
+        // Determine which block this position maps to
+        let seq = self
+            .cache
+            .sequences
+            .get(&seq_id)
+            .ok_or(PagedAttentionError::UnknownSequence(seq_id))?;
+        if let Some((phys_id, _slot)) =
+            seq.block_tables[layer_idx].physical_block_for_position(position, self.cache.block_size)
+        {
+            self.ensure_resident(layer_idx, phys_id)?;
+            if let Some(ref mut swapper) = self.swapper {
+                swapper.touch(BlockId {
+                    layer_idx,
+                    block_id: phys_id,
+                });
+            }
+        }
+        // Return owned copy since we need &mut self
+        Ok(self
+            .cache
+            .key_at(seq_id, layer_idx, position, kv_head)?
+            .to_vec())
+    }
+
+    /// Read value with automatic swap-in
+    pub fn value_at(
+        &mut self,
+        seq_id: SeqId,
+        layer_idx: usize,
+        position: usize,
+        kv_head: usize,
+    ) -> Result<Vec<f32>, PagedAttentionError> {
+        let seq = self
+            .cache
+            .sequences
+            .get(&seq_id)
+            .ok_or(PagedAttentionError::UnknownSequence(seq_id))?;
+        if let Some((phys_id, _slot)) =
+            seq.block_tables[layer_idx].physical_block_for_position(position, self.cache.block_size)
+        {
+            self.ensure_resident(layer_idx, phys_id)?;
+            if let Some(ref mut swapper) = self.swapper {
+                swapper.touch(BlockId {
+                    layer_idx,
+                    block_id: phys_id,
+                });
+            }
+        }
+        Ok(self
+            .cache
+            .value_at(seq_id, layer_idx, position, kv_head)?
+            .to_vec())
+    }
+
+    /// Prefetch blocks that are likely to be needed soon
+    pub fn prefetch(&mut self, max_blocks: usize) -> Result<usize, PagedAttentionError> {
+        let swapper = match self.swapper.as_mut() {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let candidates = swapper.get_prefetch_candidates(max_blocks);
+        let mut prefetched = 0;
+
+        for id in candidates {
+            if self.cache.is_block_swapped(id.layer_idx, id.block_id) {
+                if let Ok(data) = swapper.swap_in(id) {
+                    self.cache
+                        .restore_block_data(id.layer_idx, id.block_id, &data);
+                    prefetched += 1;
+                }
+            }
+        }
+
+        if prefetched > 0 {
+            debug!("Prefetched {} blocks from SSD", prefetched);
+        }
+        Ok(prefetched)
+    }
+
+    /// Increment sequence length (delegates)
+    pub fn increment_seq_len(&mut self, seq_id: SeqId) -> Result<(), PagedAttentionError> {
+        self.cache.increment_seq_len(seq_id)
+    }
+
+    /// Remove a sequence, cleaning up swap state
+    pub fn remove_sequence(&mut self, seq_id: SeqId) -> Result<(), PagedAttentionError> {
+        // Clean up swap tracking for this sequence's blocks
+        if let Ok(blocks) = self.cache.sequence_block_ids(seq_id) {
+            if let Some(ref mut swapper) = self.swapper {
+                for id in &blocks {
+                    swapper.remove_block(id);
+                }
+            }
+        }
+        self.cache.remove_sequence(seq_id)
+    }
+
+    /// Fork a sequence (delegates)
+    pub fn fork_sequence(&mut self, src_seq_id: SeqId) -> Result<SeqId, PagedAttentionError> {
+        self.cache.fork_sequence(src_seq_id)
+    }
+
+    /// Get stats including swap info
+    pub fn stats(&self) -> PagedCacheStats {
+        self.cache.stats()
+    }
+
+    /// Get swap-specific stats
+    pub fn swap_stats(&self) -> Option<BlockSwapStats> {
+        self.swapper.as_ref().map(|s| s.stats())
+    }
+
+    /// Number of active sequences
+    pub fn num_sequences(&self) -> usize {
+        self.cache.num_sequences()
+    }
 }
 
 /// Statistics for the paged cache
@@ -851,5 +1204,87 @@ mod tests {
         let display = format!("{}", stats);
         assert!(display.contains("0/1000"));
         assert!(display.contains("0 sequences"));
+    }
+
+    #[test]
+    fn test_extract_restore_block_data() {
+        let mut cache = PagedKvCache::new(1, 2, 4, 4, 10);
+        let seq = cache.add_sequence();
+        let kv_dim = 2 * 4;
+
+        let key: Vec<f32> = (0..kv_dim).map(|i| i as f32 * 0.5).collect();
+        let value: Vec<f32> = (0..kv_dim).map(|i| i as f32 * 0.3).collect();
+        cache.append(seq, 0, &key, &value).unwrap();
+        cache.increment_seq_len(seq).unwrap();
+
+        // Extract block data
+        let blocks = cache.sequence_block_ids(seq).unwrap();
+        assert!(!blocks.is_empty());
+
+        let data = cache.extract_block_data(0, blocks[0].block_id);
+        assert_eq!(data.num_filled, 1);
+
+        // Mark swapped, verify
+        cache.mark_swapped(0, blocks[0].block_id);
+        assert!(cache.is_block_swapped(0, blocks[0].block_id));
+
+        // Restore
+        cache.restore_block_data(0, blocks[0].block_id, &data);
+        assert!(!cache.is_block_swapped(0, blocks[0].block_id));
+
+        // Verify data integrity
+        let k = cache.key_at(seq, 0, 0, 0).unwrap();
+        assert!((k[0] - 0.0).abs() < 1e-6);
+        assert!((k[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_swap_aware_cache_basic() {
+        let swap_dir =
+            std::env::temp_dir().join(format!("ssd_llm_paged_swap_test_{}", std::process::id()));
+
+        let mut cache = SwapAwarePagedKvCache::new(1, 2, 4, 4, 10, Some(&swap_dir));
+        let seq = cache.add_sequence();
+        let kv_dim = 2 * 4;
+
+        // Append tokens
+        for i in 0..8 {
+            let key: Vec<f32> = vec![i as f32; kv_dim];
+            let value: Vec<f32> = vec![i as f32 * 2.0; kv_dim];
+            cache.append(seq, 0, &key, &value).unwrap();
+            cache.increment_seq_len(seq).unwrap();
+        }
+
+        // Read back
+        let k = cache.key_at(seq, 0, 5, 0).unwrap();
+        assert!((k[0] - 5.0).abs() < 1e-6);
+
+        let v = cache.value_at(seq, 0, 5, 0).unwrap();
+        assert!((v[0] - 10.0).abs() < 1e-6);
+
+        // Verify swap stats exist
+        let swap_stats = cache.swap_stats();
+        assert!(swap_stats.is_some());
+
+        // Cleanup
+        cache.remove_sequence(seq).unwrap();
+        assert_eq!(cache.num_sequences(), 0);
+
+        let _ = std::fs::remove_dir_all(&swap_dir);
+    }
+
+    #[test]
+    fn test_swap_aware_cache_no_swap_dir() {
+        let mut cache = SwapAwarePagedKvCache::new(1, 2, 4, 4, 10, None);
+        let seq = cache.add_sequence();
+        let kv_dim = 8;
+
+        cache
+            .append(seq, 0, &vec![1.0; kv_dim], &vec![1.0; kv_dim])
+            .unwrap();
+        cache.increment_seq_len(seq).unwrap();
+
+        assert!(cache.swap_stats().is_none());
+        assert_eq!(cache.stats().used_blocks_per_layer, 1);
     }
 }
