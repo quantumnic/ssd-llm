@@ -40,6 +40,9 @@ pub struct ServerConfig {
     pub prompt_cache: bool,
     pub max_batch: usize,
     pub tensor_parallel: usize,
+    pub paged_kv: bool,
+    pub paged_kv_blocks: usize,
+    pub paged_block_size: usize,
 }
 
 /// Model context shared across requests

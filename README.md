@@ -54,6 +54,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **⚙️ Configuration File** — TOML config file support for persistent settings
 - **🛑 Graceful Shutdown** — Signal handling (SIGINT/SIGTERM) for clean server shutdown
 - **🔧 CORS Support** — Full CORS preflight handling for browser-based clients
+- **📄 PagedAttention** — vLLM-style paged KV cache: fixed-size blocks allocated on-demand, copy-on-write for beam search/parallel sampling, near-zero memory waste, sequence forking
 - **🧮 Embeddings API** — OpenAI-compatible `/v1/embeddings` endpoint with L2-normalized vectors for RAG pipelines
 - **📋 Models Listing** — OpenAI-compatible `/v1/models` endpoint for client discovery
 - **🎭 Chat Templates** — Auto-detected formatting for Llama 2, Llama 3, Mistral, Gemma, Phi-3, ChatML, and raw mode

@@ -204,6 +204,18 @@ enum Commands {
         /// LoRA scaling factor (default 1.0)
         #[arg(long, default_value_t = 1.0)]
         lora_scale: f32,
+
+        /// Enable PagedAttention (vLLM-style paged KV cache for efficient memory)
+        #[arg(long, default_value_t = false)]
+        paged_kv: bool,
+
+        /// Number of KV cache blocks per layer for PagedAttention (default: auto from memory budget)
+        #[arg(long, default_value_t = 0)]
+        paged_kv_blocks: usize,
+
+        /// PagedAttention block size in tokens (default: 16)
+        #[arg(long, default_value_t = 16)]
+        paged_block_size: usize,
     },
     /// Download a GGUF model from Hugging Face
     Pull {
@@ -640,6 +652,9 @@ fn main() -> Result<()> {
             kv_quantize: _,
             lora_adapters,
             lora_scale,
+            paged_kv,
+            paged_kv_blocks,
+            paged_block_size,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
             let tp_shards = if tensor_parallel > 0 {
@@ -655,6 +670,18 @@ fn main() -> Result<()> {
                 println!("🔗 LoRA adapter loaded: {}", lora_path.display());
             }
 
+            if paged_kv {
+                println!(
+                    "📄 PagedAttention enabled: block_size={}, blocks={}",
+                    paged_block_size,
+                    if paged_kv_blocks > 0 {
+                        format!("{}", paged_kv_blocks)
+                    } else {
+                        "auto".to_string()
+                    }
+                );
+            }
+
             let server = api::server::ApiServer::new(api::server::ServerConfig {
                 host,
                 port,
@@ -666,6 +693,9 @@ fn main() -> Result<()> {
                 prompt_cache,
                 max_batch,
                 tensor_parallel: tp_shards,
+                paged_kv,
+                paged_kv_blocks,
+                paged_block_size,
             });
             server.run()?;
         }
