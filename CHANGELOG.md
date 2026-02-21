@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.15.0 — Q2_K/Q8_K GPU Dequantization — Complete K-Quant Family (2026-02-21)
+
+### Added
+- **Q2_K dequantization**: Full CPU and Metal GPU dequant-matvec for Q2_K quantized tensors (2-bit K-quant with 4-bit scales/mins, 84B per 256-element block)
+- **Q8_K dequantization**: Full CPU and Metal GPU dequant-matvec for Q8_K quantized tensors (8-bit K-quant with f32 super-block scale, 292B per 256-element block)
+- **Metal shaders**: `matvec_q2_k` and `matvec_q8_k` GPU kernels with on-the-fly dequantization for Apple Silicon acceleration
+- **GPU dispatch**: Automatic Metal GPU dispatch for Q2_K and Q8_K (completing the full K-quant family: Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K)
+- **5 new tests**: Q2_K CPU dequant (basic, nonzero, with-min), Q8_K CPU dequant (basic, negative) — 267 total, all passing
+
+### Fixed
+- **Q2_K block size**: Corrected from 100 to 84 bytes (matching ggml spec: 2B d + 2B dmin + 16B scales + 64B qs)
+- **Q8_K block size**: Corrected from 324 to 292 bytes (matching ggml spec: 4B d + 256B qs + 32B bsums)
+
+### Why This Matters
+Q2_K is the most aggressive K-quant, enabling 70B+ models to fit in ~20GB — critical for 24GB Macs. Q8_K provides lossless-quality quantization used as an intermediate format. With this release, **ssd-llm supports the complete K-quant family on GPU**: Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K — plus Q4_0 and Q8_0. Every quantization level now runs at full Metal-accelerated speed.
+
+### Changed
+- `matvec_quantized` dispatch now routes Q2_K and Q8_K to GPU when Metal is available
+- `matvec_quantized_cpu` dispatch now handles Q2_K and Q8_K (previously returned zeros)
+- Cargo.toml version bumped to 1.15.0
+
 ## v1.14.0 — Q3_K/Q5_K GPU Dequantization + Ollama Embeddings API (2026-02-21)
 
 ### Added

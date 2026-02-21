@@ -59,7 +59,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🎭 Chat Templates** — Auto-detected formatting for Llama 2, Llama 3, Mistral, Gemma, Phi-3, ChatML, and raw mode
 - **🛑 Stop Sequences** — Early generation termination on configurable stop strings
 - **🔁 Repetition Penalties** — Repetition, frequency, and presence penalties to reduce repetitive output
-- **🔢 K-Quant Support** — GPU-accelerated Q4_K and Q6_K dequantization via Metal shaders, plus CPU fallback for all K-quant types
+- **🔢 Complete K-Quant Family** — GPU-accelerated dequantization for all K-quants (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K) via Metal shaders, plus CPU fallback
 - **🗜️ KV Cache Quantization** — INT8 per-row quantized KV cache for 4x memory reduction, enabling much longer context windows
 - **📐 RoPE Scaling** — Linear, NTK-aware, and YaRN scaling methods for extended context windows beyond training length
 - **🎲 Min-P Sampling** — Adaptive probability filtering that scales with model confidence for better quality/diversity trade-off

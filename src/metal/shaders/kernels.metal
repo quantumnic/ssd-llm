@@ -476,6 +476,99 @@ kernel void matvec_q5_k(
 }
 
 // ============================================================
+// Quantized Q2_K matrix-vector multiply (dequantize on-the-fly)
+// K-quant block (256 elements):
+//   f16 d (2B) + f16 dmin (2B) + 16B scales/mins + 64B qs (2-bit quants) = 84B
+// ============================================================
+kernel void matvec_q2_k(
+    device const uchar* W_quantized  [[buffer(0)]],
+    device const float* x            [[buffer(1)]],
+    device float* y                  [[buffer(2)]],
+    constant uint& out_dim           [[buffer(3)]],
+    constant uint& in_dim            [[buffer(4)]],
+    uint tid                         [[thread_position_in_grid]]
+) {
+    if (tid >= out_dim) return;
+
+    uint block_size = 256;
+    uint block_bytes = 84; // 2+2+16+64
+    uint blocks_per_row = in_dim / block_size;
+    uint row_offset = tid * blocks_per_row * block_bytes;
+
+    float sum = 0.0;
+
+    for (uint b = 0; b < blocks_per_row; b++) {
+        uint boff = row_offset + b * block_bytes;
+
+        ushort d_bits = ushort(W_quantized[boff]) | (ushort(W_quantized[boff + 1]) << 8);
+        ushort dmin_bits = ushort(W_quantized[boff + 2]) | (ushort(W_quantized[boff + 3]) << 8);
+        float d = float(as_type<half>(d_bits));
+        float dmin = float(as_type<half>(dmin_bits));
+
+        device const uchar* sc = W_quantized + boff + 4;   // 16 bytes: scales/mins
+        device const uchar* qs = W_quantized + boff + 20;  // 64 bytes: 2-bit quants
+
+        uint x_base = b * block_size;
+
+        // 16 sub-blocks of 16 elements each
+        for (uint sb = 0; sb < 16; sb++) {
+            float scale = d * float(sc[sb] & 0x0F);
+            float min_val = dmin * float((sc[sb] >> 4) & 0x0F);
+
+            for (uint j = 0; j < 16; j++) {
+                uint idx = sb * 16 + j;
+                uchar qs_byte = qs[idx / 4];
+                uint shift = (idx % 4) * 2;
+                float q = float((qs_byte >> shift) & 0x03);
+                sum += (scale * q - min_val) * x[x_base + idx];
+            }
+        }
+    }
+
+    y[tid] = sum;
+}
+
+// ============================================================
+// Quantized Q8_K matrix-vector multiply (dequantize on-the-fly)
+// K-quant block (256 elements):
+//   f32 d (4B) + 256B qs (int8) + 32B bsums = 292B
+// ============================================================
+kernel void matvec_q8_k(
+    device const uchar* W_quantized  [[buffer(0)]],
+    device const float* x            [[buffer(1)]],
+    device float* y                  [[buffer(2)]],
+    constant uint& out_dim           [[buffer(3)]],
+    constant uint& in_dim            [[buffer(4)]],
+    uint tid                         [[thread_position_in_grid]]
+) {
+    if (tid >= out_dim) return;
+
+    uint block_size = 256;
+    uint block_bytes = 292; // 4+256+32
+    uint blocks_per_row = in_dim / block_size;
+    uint row_offset = tid * blocks_per_row * block_bytes;
+
+    float sum = 0.0;
+
+    for (uint b = 0; b < blocks_per_row; b++) {
+        uint boff = row_offset + b * block_bytes;
+
+        // f32 scale (little-endian)
+        uint d_bits = uint(W_quantized[boff]) | (uint(W_quantized[boff + 1]) << 8) |
+                      (uint(W_quantized[boff + 2]) << 16) | (uint(W_quantized[boff + 3]) << 24);
+        float d = as_type<float>(d_bits);
+
+        uint x_base = b * block_size;
+        for (uint j = 0; j < 256; j++) {
+            float val = float(as_type<char>(W_quantized[boff + 4 + j])) * d;
+            sum += val * x[x_base + j];
+        }
+    }
+
+    y[tid] = sum;
+}
+
+// ============================================================
 // Quantized Q8_0 matrix-vector multiply (dequantize on-the-fly)
 // Block layout: f16 scale (2 bytes) + 32 x int8
 // ============================================================

@@ -153,7 +153,7 @@ impl MetalCompute {
     }
 
     /// Quantized matrix-vector multiply with automatic dispatch by type
-    /// Supports Q4_0, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0 on GPU; falls back to CPU for others
+    /// Supports Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K, Q4_0, Q8_0 on GPU; falls back to CPU for others
     pub fn matvec_quantized(
         &self,
         w_raw: &[u8],
@@ -172,6 +172,8 @@ impl MetalCompute {
                     GgmlType::Q5K => return gpu.matvec_q5_k(w_raw, x, out_dim, in_dim),
                     GgmlType::Q6K => return gpu.matvec_q6_k(w_raw, x, out_dim, in_dim),
                     GgmlType::Q8_0 => return gpu.matvec_q8_0(w_raw, x, out_dim, in_dim),
+                    GgmlType::Q2K => return gpu.matvec_q2_k(w_raw, x, out_dim, in_dim),
+                    GgmlType::Q8K => return gpu.matvec_q8_k(w_raw, x, out_dim, in_dim),
                     _ => {}
                 }
             }
@@ -321,6 +323,8 @@ pub fn matvec_quantized_cpu(
         GgmlType::Q5K => matvec_q5_k_cpu(w_raw, x, out_dim, in_dim),
         GgmlType::Q6K => matvec_q6_k_cpu(w_raw, x, out_dim, in_dim),
         GgmlType::Q8_0 => matvec_q8_0_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::Q2K => matvec_q2_k_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::Q8K => matvec_q8_k_cpu(w_raw, x, out_dim, in_dim),
         _ => {
             debug!("Unsupported quant type {:?}, returning zeros", dtype);
             vec![0.0; out_dim]
@@ -576,6 +580,74 @@ fn matvec_q8_0_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f3
     y
 }
 
+/// CPU Q2_K dequant matvec
+/// Block layout (256 elements, 84 bytes):
+///   f16 d (2B) + f16 dmin (2B) + 16B scales/mins (4-bit packed) + 64B qs (2-bit quants)
+fn matvec_q2_k_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let block_size = 256usize;
+    let block_bytes = 84usize;
+    let blocks_per_row = in_dim / block_size;
+    let mut y = vec![0.0f32; out_dim];
+
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * blocks_per_row * block_bytes;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_row {
+            let boff = row_off + b * block_bytes;
+            let d = f16_to_f32(w[boff], w[boff + 1]);
+            let dmin = f16_to_f32(w[boff + 2], w[boff + 3]);
+            let sc = &w[boff + 4..boff + 20]; // 16 bytes: scales and mins
+            let qs = &w[boff + 20..boff + 84]; // 64 bytes: 2-bit quants (4 per byte)
+            let x_base = b * block_size;
+
+            // 16 sub-blocks of 16 elements each
+            for (sb, &sc_byte) in sc.iter().enumerate() {
+                // Each scale byte packs: low 4 bits = scale, high 4 bits = min
+                let scale = d * (sc_byte & 0x0F) as f32;
+                let min_val = dmin * ((sc_byte >> 4) & 0x0F) as f32;
+
+                for j in 0..16usize {
+                    let idx = sb * 16 + j;
+                    // 2-bit quant, 4 per byte
+                    let qs_byte = qs[idx / 4];
+                    let shift = (idx % 4) * 2;
+                    let q = ((qs_byte >> shift) & 0x03) as f32;
+                    sum += (scale * q - min_val) * x[x_base + idx];
+                }
+            }
+        }
+        *y_val = sum;
+    }
+    y
+}
+
+/// CPU Q8_K dequant matvec
+/// Block layout (256 elements, 292 bytes):
+///   f32 d (4B) + 256B qs (int8) + 32B bsums (16 × int16, unused for matvec)
+fn matvec_q8_k_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let block_size = 256usize;
+    let block_bytes = 292usize;
+    let blocks_per_row = in_dim / block_size;
+    let mut y = vec![0.0f32; out_dim];
+
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * blocks_per_row * block_bytes;
+        let mut sum = 0.0f32;
+        for b in 0..blocks_per_row {
+            let boff = row_off + b * block_bytes;
+            // f32 scale (little-endian)
+            let d = f32::from_le_bytes([w[boff], w[boff + 1], w[boff + 2], w[boff + 3]]);
+            let x_base = b * block_size;
+            for j in 0..256 {
+                let val = w[boff + 4 + j] as i8;
+                sum += d * val as f32 * x[x_base + j];
+            }
+        }
+        *y_val = sum;
+    }
+    y
+}
+
 /// Convert two bytes (little-endian) to f32 via f16
 #[inline]
 fn f16_to_f32(lo: u8, hi: u8) -> f32 {
@@ -750,6 +822,106 @@ mod tests {
         let x = vec![1.0f32; 256];
         let y = matvec_q5_k_cpu(&block, &x, 1, 256);
         assert!((y[0] - 32.0).abs() < 1e-3, "Expected 32.0, got {}", y[0]);
+    }
+
+    #[test]
+    fn test_matvec_q2_k_cpu_basic() {
+        // 1 row, 256 elements (1 block = 84 bytes)
+        // Block: f16 d + f16 dmin + 16B scales + 64B qs
+        let mut block = vec![0u8; 84];
+        // d = 1.0, dmin = 0.0
+        let d_bits = half::f16::from_f32(1.0).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        // dmin = 0, all scales = 0, all qs = 0 => scale=0, min=0 => sum=0
+        let x = vec![1.0f32; 256];
+        let y = matvec_q2_k_cpu(&block, &x, 1, 256);
+        assert!(y[0].abs() < 1e-5, "Zero scales should give 0, got {}", y[0]);
+    }
+
+    #[test]
+    fn test_matvec_q2_k_cpu_nonzero() {
+        // Test with scale=1, dmin=0, sub-block 0 scale_nibble=2
+        // qs for sub-block 0: all bits = 01 => q=1
+        let mut block = vec![0u8; 84];
+        let d_bits = half::f16::from_f32(1.0).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        // dmin = 0
+        // sc[0] low nibble = 2 (scale=2.0), high nibble = 0 (min=0)
+        block[4] = 0x02;
+        // qs for sub-block 0 elements [0..16] → indices 0..15 in qs (bytes 0..3)
+        // Each byte holds 4 quants at 2 bits. Set all to 01 = 0x55
+        for j in 0..4 {
+            block[20 + j] = 0x55; // 01 01 01 01
+        }
+        // Sub-block 0: 16 elements, each q=1, scale=2.0, min=0
+        // contribution = 2.0 * 1 * 1.0 * 16 = 32.0
+        let x = vec![1.0f32; 256];
+        let y = matvec_q2_k_cpu(&block, &x, 1, 256);
+        assert!((y[0] - 32.0).abs() < 1e-3, "Expected 32.0, got {}", y[0]);
+    }
+
+    #[test]
+    fn test_matvec_q2_k_cpu_with_min() {
+        // Test that dmin subtracts correctly
+        let mut block = vec![0u8; 84];
+        let d_bits = half::f16::from_f32(1.0).to_bits();
+        block[0] = d_bits as u8;
+        block[1] = (d_bits >> 8) as u8;
+        let dmin_bits = half::f16::from_f32(0.5).to_bits();
+        block[2] = dmin_bits as u8;
+        block[3] = (dmin_bits >> 8) as u8;
+        // sc[0]: low nibble = 0 (scale=0), high nibble = 2 (min=0.5*2=1.0)
+        block[4] = 0x20;
+        // qs all 0 => q=0 for everything
+        // Sub-block 0: 16 elements, each = (0*0 - 1.0) = -1.0
+        // contribution = -1.0 * 1.0 * 16 = -16.0
+        let x = vec![1.0f32; 256];
+        let y = matvec_q2_k_cpu(&block, &x, 1, 256);
+        assert!(
+            (y[0] - (-16.0)).abs() < 1e-3,
+            "Expected -16.0, got {}",
+            y[0]
+        );
+    }
+
+    #[test]
+    fn test_matvec_q8_k_cpu_basic() {
+        // 1 row, 256 elements (1 block = 292 bytes)
+        // Block: f32 d (4B) + 256B qs (int8) + 32B bsums
+        let mut block = vec![0u8; 292];
+        // d = 1.0 (f32 little-endian)
+        let d_bytes = 1.0f32.to_le_bytes();
+        block[0..4].copy_from_slice(&d_bytes);
+        // All qs = 1 (int8)
+        for j in 0..256 {
+            block[4 + j] = 1u8;
+        }
+        let x = vec![1.0f32; 256];
+        let y = matvec_q8_k_cpu(&block, &x, 1, 256);
+        // Each val = 1.0 * 1 = 1.0, sum = 256.0
+        assert!((y[0] - 256.0).abs() < 1e-3, "Expected 256.0, got {}", y[0]);
+    }
+
+    #[test]
+    fn test_matvec_q8_k_cpu_negative() {
+        // Test with negative values
+        let mut block = vec![0u8; 292];
+        let d_bytes = 0.5f32.to_le_bytes();
+        block[0..4].copy_from_slice(&d_bytes);
+        // All qs = -2 (0xFE as i8)
+        for j in 0..256 {
+            block[4 + j] = 0xFE; // -2 as i8
+        }
+        let x = vec![1.0f32; 256];
+        let y = matvec_q8_k_cpu(&block, &x, 1, 256);
+        // Each val = 0.5 * (-2) = -1.0, sum = -256.0
+        assert!(
+            (y[0] - (-256.0)).abs() < 1e-3,
+            "Expected -256.0, got {}",
+            y[0]
+        );
     }
 
     #[test]
