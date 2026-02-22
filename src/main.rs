@@ -224,6 +224,10 @@ enum Commands {
         /// Enable adaptive memory pressure monitoring (auto-adjusts cache budget based on system RAM)
         #[arg(long, default_value_t = false)]
         adaptive_memory: bool,
+
+        /// Adaptive layer pinning: auto-pin N hottest layers in RAM (0 = disabled)
+        #[arg(long, default_value_t = 0)]
+        adaptive_pin: usize,
     },
     /// Download a GGUF model from Hugging Face
     Pull {
@@ -703,6 +707,7 @@ fn main() -> Result<()> {
             paged_block_size,
             swap_quantize,
             adaptive_memory,
+            adaptive_pin,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
 
@@ -766,7 +771,16 @@ fn main() -> Result<()> {
                 paged_kv_blocks,
                 paged_block_size,
                 swap_quantize,
+                adaptive_pin,
             });
+
+            if adaptive_pin > 0 {
+                println!(
+                    "📌 Adaptive layer pinning: auto-pin top {} hottest layers",
+                    adaptive_pin
+                );
+            }
+
             server.run()?;
         }
 

@@ -44,6 +44,7 @@ pub struct ServerConfig {
     pub paged_kv_blocks: usize,
     pub paged_block_size: usize,
     pub swap_quantize: bool,
+    pub adaptive_pin: usize,
 }
 
 /// Model context shared across requests
@@ -53,6 +54,7 @@ struct ModelContext {
     cache: LayerCache,
     model_name: String,
     model_path: PathBuf,
+    adaptive_pinner: Option<crate::model::cache::AdaptiveLayerPinner>,
 }
 
 /// The API server
@@ -97,12 +99,22 @@ impl ApiServer {
             gguf.vocab_size()
         );
 
+        let adaptive_pinner = if self.config.adaptive_pin > 0 {
+            Some(crate::model::cache::AdaptiveLayerPinner::new(
+                self.config.adaptive_pin,
+                10, // minimum 10 accesses before eligible for pinning
+            ))
+        } else {
+            None
+        };
+
         let ctx = Arc::new(Mutex::new(ModelContext {
             gguf,
             streamer,
             cache,
             model_name,
             model_path: self.config.model_path.clone(),
+            adaptive_pinner,
         }));
 
         // Graceful shutdown via SIGINT/SIGTERM

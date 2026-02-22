@@ -79,6 +79,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **📊 Perplexity Evaluation** — `ssd-llm perplexity` measures model quality with sliding-window NLL computation, per-chunk stats, JSON output for CI/CD, quantization quality comparison
 - **🧠 Adaptive Memory Pressure** — Real-time macOS VM pressure monitoring via `host_statistics64`, automatic cache budget scaling (100%→25%), smart prefetch throttling, Prometheus metrics for memory state
 - **🔢 BF16 & F16 Matvec** — Native BF16 (brain float 16) and F16 (IEEE 754 half) matrix-vector multiply on CPU and Metal GPU, enabling direct inference from unquantized model weights without dequantization overhead
+- **📌 Adaptive Layer Pinning** — Automatic hot-layer detection: tracks per-layer access frequency with exponential decay, auto-pins the N hottest layers in RAM (e.g., embeddings, early attention), configurable via `--adaptive-pin N`
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
