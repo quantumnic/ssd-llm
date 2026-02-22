@@ -602,7 +602,7 @@ impl BenchmarkResults {
                 };
                 md.push_str(&format!("| {} | {} | {} |\n", m.name, val_str, m.unit));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md.push_str("## Summary\n\n");

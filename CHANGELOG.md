@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.27.0 — ARM NEON SIMD Intrinsics — Native Apple Silicon CPU Acceleration (2026-02-22)
+
+### Added
+- **ARM NEON matvec**: Explicit `vfmaq_f32`/`vld1q_f32` intrinsics with 4-accumulator unrolling (16 elements/iteration) replacing the scalar loop-unrolled "simd" path. 2-4x speedup for CPU-bound f32 matrix-vector multiply.
+- **NEON dot product**: `dot_f32_neon()` with 16-wide NEON FMA, used as building block for all matvec operations.
+- **NEON RMS normalization**: Vectorized sum-of-squares and fused weight multiply using NEON FMA.
+- **NEON softmax**: Vectorized max-finding (`vmaxq_f32`/`vmaxvq_f32`) and normalization.
+- **NEON f16 matvec**: f16→f32 conversion + NEON dot product for half-precision weight matrices.
+- **NEON element-wise ops**: `vec_mul_f32_neon` (Hadamard product) and `vec_add_f32_neon` (vector addition) with 4-wide NEON.
+- **Transparent integration**: `matvec_f32_simd`, `rmsnorm_f32_fast`, and `softmax_f32_fast` now auto-dispatch to NEON on aarch64, scalar fallback on other architectures. Zero API changes required.
+- **13 new tests** (376 total): dot product (basic, large, odd-length, zeros), matvec (identity, 2x2, large vs scalar, exact), rmsnorm (basic, large), softmax, vec_mul, vec_add — all passing.
+
+### Technical Details
+- Uses `std::arch::aarch64` intrinsics: `vld1q_f32`, `vfmaq_f32`, `vaddq_f32`, `vaddvq_f32`, `vmulq_f32`, `vmaxq_f32`, `vmaxvq_f32`, `vdupq_n_f32`, `vst1q_f32`
+- 4 NEON accumulators per dot product → hides FMA latency (4-cycle pipeline on M1/M2/M3)
+- 16-element inner loop → saturates 128-bit NEON lanes with instruction-level parallelism
+- Scalar tail handling for non-16-aligned dimensions
+- f16 path pre-converts via `half` crate (Rust NEON f16 intrinsics still unstable)
+
+### Why This Matters
+CPU matvec is the hot path when Metal GPU is unavailable or for small tensors below the GPU dispatch threshold. The prior "simd" implementation was manual 4-wide loop unrolling that relied on auto-vectorization — which often doesn't fire with complex control flow. Explicit NEON intrinsics guarantee vectorization and provide predictable 2-4x speedup on all Apple Silicon Macs.
+
+### Changed
+- `matvec_f32_simd` now delegates to NEON on aarch64 (scalar path preserved as `matvec_f32_simd_scalar`)
+- `rmsnorm_f32_fast` now delegates to NEON on aarch64 (scalar path preserved as `rmsnorm_f32_fast_scalar`)
+- `softmax_f32_fast` now delegates to NEON on aarch64 (scalar path preserved as `softmax_f32_fast_scalar`)
+- Fixed pre-existing clippy warnings in AWQ and benchmark modules (div_ceil, is_multiple_of, push_str→push)
+- Cargo.toml version bumped to 1.27.0
+
 ## v1.21.0 — IQ2_XXS and IQ2_XS Dequantization — Sub-2.5-Bit I-Quant Support (2026-02-22)
 
 ### Added

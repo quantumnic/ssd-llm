@@ -223,9 +223,22 @@ impl MetalCompute {
     }
 }
 
-/// SIMD-friendly matrix-vector multiply using 4-wide accumulation
-/// On Apple Silicon, the compiler auto-vectorizes this to NEON instructions
+/// SIMD-friendly matrix-vector multiply.
+/// v1.27: On aarch64, delegates to explicit NEON intrinsics for 2-4x speedup.
+/// On other architectures, uses 4-wide scalar accumulation.
 pub fn matvec_f32_simd(w: &[f32], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        super::neon::matvec_f32_neon(w, x, out_dim, in_dim)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        matvec_f32_simd_scalar(w, x, out_dim, in_dim)
+    }
+}
+
+/// Scalar 4-wide accumulation fallback
+pub fn matvec_f32_simd_scalar(w: &[f32], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; out_dim];
     let chunks = in_dim / 4;
     let remainder = in_dim % 4;
@@ -261,8 +274,21 @@ pub fn matvec_f32_simd(w: &[f32], x: &[f32], out_dim: usize, in_dim: usize) -> V
     y
 }
 
-/// Fast RMS normalization with fused multiply
+/// Fast RMS normalization with fused multiply.
+/// v1.27: On aarch64, delegates to NEON intrinsics.
 pub fn rmsnorm_f32_fast(x: &mut [f32], weight: &[f32], eps: f32) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        super::neon::rmsnorm_f32_neon(x, weight, eps);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        rmsnorm_f32_fast_scalar(x, weight, eps);
+    }
+}
+
+/// Scalar RMS normalization fallback
+pub fn rmsnorm_f32_fast_scalar(x: &mut [f32], weight: &[f32], eps: f32) {
     let n = x.len();
     let sum_sq: f32 = x.iter().map(|v| v * v).sum();
     let inv_rms = 1.0 / (sum_sq / n as f32 + eps).sqrt();
@@ -272,8 +298,21 @@ pub fn rmsnorm_f32_fast(x: &mut [f32], weight: &[f32], eps: f32) {
     }
 }
 
-/// Numerically stable softmax
+/// Numerically stable softmax.
+/// v1.27: On aarch64, delegates to NEON intrinsics.
 pub fn softmax_f32_fast(x: &mut [f32]) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        super::neon::softmax_f32_neon(x);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        softmax_f32_fast_scalar(x);
+    }
+}
+
+/// Scalar softmax fallback
+pub fn softmax_f32_fast_scalar(x: &mut [f32]) {
     if x.is_empty() {
         return;
     }

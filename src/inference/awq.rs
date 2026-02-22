@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! AWQ (Activation-aware Weight Quantization)
 //!
 //! Implements per-channel scaling based on activation magnitudes for more accurate
@@ -152,7 +153,7 @@ impl AwqQuantizedWeight {
     /// Dequantize back to f32 for inference: w' = (q * Δ + zero) / s
     pub fn dequantize(&self) -> Vec<f32> {
         let mut output = vec![0.0f32; self.d_out * self.d_in];
-        let groups_per_row = (self.d_in + self.group_size - 1) / self.group_size;
+        let groups_per_row = self.d_in.div_ceil(self.group_size);
 
         for row in 0..self.d_out {
             for col in 0..self.d_in {
@@ -175,7 +176,7 @@ impl AwqQuantizedWeight {
     pub fn matvec(&self, input: &[f32]) -> Vec<f32> {
         assert_eq!(input.len(), self.d_in, "Input dimension mismatch");
         let mut output = vec![0.0f32; self.d_out];
-        let groups_per_row = (self.d_in + self.group_size - 1) / self.group_size;
+        let groups_per_row = self.d_in.div_ceil(self.group_size);
 
         for row in 0..self.d_out {
             let mut sum = 0.0f32;
@@ -205,7 +206,7 @@ impl AwqQuantizedWeight {
                     return 0;
                 }
                 let byte = self.data[byte_idx];
-                if linear_idx % 2 == 0 {
+                if linear_idx.is_multiple_of(2) {
                     (byte & 0x0F) as i32 - 8 // signed 4-bit: range [-8, 7]
                 } else {
                     ((byte >> 4) & 0x0F) as i32 - 8
@@ -301,7 +302,7 @@ pub fn quantize_awq(
     }
 
     // Step 3: Per-group quantization of scaled weights
-    let groups_per_row = (d_in + config.group_size - 1) / config.group_size;
+    let groups_per_row = d_in.div_ceil(config.group_size);
     let total_groups = d_out * groups_per_row;
     let mut scales = vec![0.0f32; total_groups];
     let mut zeros = vec![0.0f32; total_groups];
@@ -356,7 +357,7 @@ pub fn quantize_awq(
     let total_elements = d_out * d_in;
     let data = match config.bits {
         4 => {
-            let mut bytes = vec![0u8; (total_elements + 1) / 2];
+            let mut bytes = vec![0u8; total_elements.div_ceil(2)];
             for row in 0..d_out {
                 for col in 0..d_in {
                     let idx = row * d_in + col;
@@ -375,7 +376,7 @@ pub fn quantize_awq(
                     let q_unsigned = (q - min_val) as u8;
 
                     let byte_idx = idx / 2;
-                    if idx % 2 == 0 {
+                    if idx.is_multiple_of(2) {
                         bytes[byte_idx] |= q_unsigned & 0x0F;
                     } else {
                         bytes[byte_idx] |= (q_unsigned & 0x0F) << 4;
@@ -406,7 +407,7 @@ pub fn quantize_awq(
         }
         3 => {
             // Pack 3-bit: 8 values into 3 bytes
-            let num_groups_of_8 = (total_elements + 7) / 8;
+            let num_groups_of_8 = total_elements.div_ceil(8);
             let mut bytes = vec![0u8; num_groups_of_8 * 3];
             for row in 0..d_out {
                 for col in 0..d_in {
@@ -443,7 +444,7 @@ pub fn quantize_awq(
             bytes
         }
         2 => {
-            let mut bytes = vec![0u8; (total_elements + 3) / 4];
+            let mut bytes = vec![0u8; total_elements.div_ceil(4)];
             for row in 0..d_out {
                 for col in 0..d_in {
                     let idx = row * d_in + col;
