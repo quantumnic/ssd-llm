@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.21.0 — IQ2_XXS and IQ2_XS Dequantization — Sub-2.5-Bit I-Quant Support (2026-02-22)
+
+### Added
+- **IQ2_XXS dequantization**: Full CPU and Metal GPU dequant-matvec for IQ2_XXS quantized tensors (2.0625 bpw, 66B per 256-element block, 256-entry grid-based importance-matrix quantization)
+- **IQ2_XS dequantization**: Full CPU and Metal GPU dequant-matvec for IQ2_XS quantized tensors (2.3125 bpw, 74B per 256-element block, 512-entry grid with per-element sign bits and per-group 4-bit scales)
+- **IQ2_XXS grid lookup table**: 256-entry `iq2xxs_grid` table (uint64, from llama.cpp) for both CPU (Rust) and GPU (Metal) paths
+- **IQ2_XS grid lookup table**: 512-entry `iq2xs_grid` table (uint64, from llama.cpp) for both CPU (Rust) and GPU (Metal) paths
+- **Metal shaders**: `matvec_iq2_xxs` and `matvec_iq2_xs` GPU kernels with grid-based dequantization for Apple Silicon acceleration
+- **GPU dispatch**: Automatic Metal GPU dispatch for IQ2_XXS and IQ2_XS
+- **GGUF metadata**: Block size (256) and type size (66/74) for IQ2_XXS, IQ2_XS, and IQ2_S
+- **8 new tests** (318 total): IQ2_XXS basic, signs, grid lookup, dispatch; IQ2_XS basic, scale, grid lookup, dispatch — all passing
+
+### Technical Details
+- IQ2_XXS: 8 groups of 32 elements per block; each group stored as 8 bytes (2×u32): first u32 holds 4 byte-sized grid indices into `iq2xxs_grid[256]`, second u32 holds 4×7-bit sign indices + 4-bit scale; `db = d * (0.5 + scale_bits) * 0.25`
+- IQ2_XS: 8 groups of 32 elements; each of 4 uint16_t per group encodes 9-bit grid index into `iq2xs_grid[512]` + 7-bit sign index; separate `scales[8]` array with 4-bit scales per group pair
+- Both grids encode 8 weight values per entry using only values {0x08, 0x19, 0x2b} mapped from the ternary {-1, 0, +1} codebook
+- Shared `ksigns_iq2xs` and `kmask_iq2xs` sign extraction tables (already present from IQ3 support)
+
+### Why This Matters
+IQ2_XXS at 2.06 bpw enables running 70B models in ~18GB — fitting in 24GB Macs with room for KV cache. IQ2_XS at 2.31 bpw offers noticeably better quality at minimal size increase. These are the most aggressive quantization formats widely available on Hugging Face. With this release, **ssd-llm supports IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS** on both CPU and Metal GPU, covering the full range of I-Quant formats from 2 to 4.5 bpw.
+
+### Changed
+- `matvec_quantized` dispatch now routes IQ2_XXS and IQ2_XS to GPU when Metal is available
+- `matvec_quantized_cpu` dispatch now handles IQ2_XXS and IQ2_XS (previously returned zeros)
+- GGUF `block_size()` and `type_size()` now return correct values for IQ2_XXS (256/66), IQ2_XS (256/74), and IQ2_S (256/82)
+- README updated to reflect expanded I-Quant support
+- Cargo.toml version bumped to 1.21.0
+
 ## v1.20.0 — IQ3_XXS and IQ3_S Dequantization — Ultra-Low-Bit I-Quant Support (2026-02-22)
 
 ### Added
