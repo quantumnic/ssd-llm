@@ -550,6 +550,212 @@ pub fn run_benchmark_json(model_path: &Path, budget: usize) -> Result<String> {
     Ok(results.to_json())
 }
 
+/// Generate a markdown benchmark report
+pub fn run_benchmark_markdown(model_path: &Path, budget: usize) -> Result<String> {
+    let results = run_benchmark_structured(model_path, budget)?;
+    Ok(results.to_markdown())
+}
+
+impl BenchmarkResults {
+    /// Render results as a markdown report
+    pub fn to_markdown(&self) -> String {
+        let mut md = String::new();
+
+        md.push_str("# ssd-llm Benchmark Report\n\n");
+        md.push_str("## Model Information\n\n");
+        md.push_str("| Property | Value |\n");
+        md.push_str("|----------|-------|\n");
+        md.push_str(&format!(
+            "| Architecture | {} |\n",
+            self.model_info.architecture
+        ));
+        md.push_str(&format!("| Layers | {} |\n", self.model_info.layers));
+        md.push_str(&format!("| Embedding dim | {} |\n", self.model_info.n_embd));
+        md.push_str(&format!(
+            "| Heads (Q/KV) | {} / {} |\n",
+            self.model_info.n_head, self.model_info.n_head_kv
+        ));
+        md.push_str(&format!(
+            "| Vocab size | {} |\n",
+            self.model_info.vocab_size
+        ));
+        md.push_str(&format!("| Tensors | {} |\n", self.model_info.tensors));
+        md.push_str(&format!(
+            "| File size | {:.2} GB |\n\n",
+            self.model_info.file_size_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        ));
+
+        md.push_str("## Benchmark Scenarios\n\n");
+
+        for scenario in &self.scenarios {
+            md.push_str(&format!("### {}\n\n", scenario.name));
+            md.push_str(&format!("_{}_\n\n", scenario.description));
+            md.push_str("| Metric | Value | Unit |\n");
+            md.push_str("|--------|------:|------|\n");
+            for m in &scenario.metrics {
+                let val_str = if m.value > 1000.0 {
+                    format!("{:.0}", m.value)
+                } else if m.value > 1.0 {
+                    format!("{:.2}", m.value)
+                } else {
+                    format!("{:.4}", m.value)
+                };
+                md.push_str(&format!("| {} | {} | {} |\n", m.name, val_str, m.unit));
+            }
+            md.push_str("\n");
+        }
+
+        md.push_str("## Summary\n\n");
+        md.push_str("| Metric | Value |\n");
+        md.push_str("|--------|------:|\n");
+        md.push_str(&format!(
+            "| SSD Bandwidth | {:.0} MB/s |\n",
+            self.summary.ssd_bandwidth_mb_per_sec
+        ));
+        md.push_str(&format!(
+            "| Est. Decode | {:.1} tok/s |\n",
+            self.summary.est_decode_tok_per_sec
+        ));
+        md.push_str(&format!(
+            "| Est. Prefill | {:.1} tok/s |\n",
+            self.summary.est_prefill_tok_per_sec
+        ));
+        md.push_str(&format!(
+            "| Cache Efficiency | {:.1}% |\n",
+            self.summary.cache_efficiency_pct
+        ));
+        md.push_str(&format!(
+            "| Memory Budget | {:.2} GB |\n",
+            self.summary.memory_budget_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        ));
+        md.push_str(&format!(
+            "| Total Bench Time | {:.2} ms |\n\n",
+            self.summary.total_duration_ms
+        ));
+
+        md
+    }
+}
+
+/// Quantization comparison results for the benchmark report
+#[derive(Debug, Clone)]
+pub struct QuantComparison {
+    pub bit_width: u32,
+    pub group_size: usize,
+    pub alpha: f32,
+    pub mse: f64,
+    pub snr_db: f64,
+    pub compression_ratio: f64,
+    pub matvec_us: f64,
+    pub memory_bytes: usize,
+}
+
+/// Run AWQ quantization benchmark comparing different bit widths
+/// Uses synthetic weights for measurement (no model file needed)
+pub fn benchmark_quantization_levels(d_out: usize, d_in: usize) -> Vec<QuantComparison> {
+    use crate::inference::awq::{
+        measure_quantization_error, quantize_awq, ActivationStats, AwqConfig,
+    };
+
+    let mut results = Vec::new();
+
+    // Generate deterministic synthetic weights
+    let mut weights = vec![0.0f32; d_out * d_in];
+    let mut state = 42u64;
+    for w in weights.iter_mut() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *w = ((state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0) as f32 * 0.5;
+    }
+
+    // Generate synthetic activation stats
+    let mut stats = ActivationStats::new(d_in);
+    let mut act = vec![0.0f32; d_in];
+    for (i, a) in act.iter_mut().enumerate() {
+        // Power-law distribution: few channels have large activations
+        *a = (1.0 + i as f32).powf(-0.5) * 10.0;
+    }
+    stats.update(&act, d_in);
+
+    for &bits in &[2u32, 3, 4, 8] {
+        for &alpha in &[0.0f32, 0.5] {
+            let config = AwqConfig {
+                bits,
+                group_size: 128,
+                alpha,
+                calibration_samples: 1,
+                clip: true,
+                clip_steps: 20,
+            };
+
+            if let Ok(qw) = quantize_awq(&weights, d_out, d_in, &stats, &config) {
+                let err = measure_quantization_error(&weights, &qw);
+                let input: Vec<f32> = (0..d_in).map(|i| (i as f32 * 0.01).sin()).collect();
+
+                let start = std::time::Instant::now();
+                let iterations = 10;
+                for _ in 0..iterations {
+                    let _ = qw.matvec(&input);
+                }
+                let elapsed = start.elapsed();
+
+                results.push(QuantComparison {
+                    bit_width: bits,
+                    group_size: 128,
+                    alpha,
+                    mse: err.mse,
+                    snr_db: err.snr_db,
+                    compression_ratio: qw.compression_ratio(),
+                    matvec_us: elapsed.as_micros() as f64 / iterations as f64,
+                    memory_bytes: qw.size_bytes(),
+                });
+            }
+        }
+    }
+
+    results
+}
+
+/// Generate markdown report comparing quantization levels
+pub fn quantization_report_markdown(d_out: usize, d_in: usize) -> String {
+    let results = benchmark_quantization_levels(d_out, d_in);
+    let mut md = String::new();
+
+    md.push_str("# AWQ Quantization Comparison Report\n\n");
+    md.push_str(&format!(
+        "Matrix size: {}×{} ({:.2} MB f32)\n\n",
+        d_out,
+        d_in,
+        (d_out * d_in * 4) as f64 / (1024.0 * 1024.0)
+    ));
+    md.push_str("| Bits | Alpha | Compression | MSE | SNR (dB) | MatVec (µs) | Memory |\n");
+    md.push_str("|-----:|------:|------------:|----:|---------:|------------:|-------:|\n");
+
+    for r in &results {
+        let alpha_str = if r.alpha < 0.01 {
+            "RTN".to_string()
+        } else {
+            format!("{:.1}", r.alpha)
+        };
+        md.push_str(&format!(
+            "| {} | {} | {:.1}x | {:.2e} | {:.1} | {:.0} | {:.2} KB |\n",
+            r.bit_width,
+            alpha_str,
+            r.compression_ratio,
+            r.mse,
+            r.snr_db,
+            r.matvec_us,
+            r.memory_bytes as f64 / 1024.0,
+        ));
+    }
+
+    md.push_str(
+        "\n_RTN = Round-to-Nearest (no activation awareness), Alpha = AWQ scaling exponent_\n",
+    );
+    md
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +812,75 @@ mod tests {
     fn test_escape_json() {
         assert_eq!(escape_json("hello\"world"), "hello\\\"world");
         assert_eq!(escape_json("line\nnewline"), "line\\nnewline");
+    }
+
+    #[test]
+    fn test_benchmark_results_to_markdown() {
+        let results = BenchmarkResults {
+            model_info: ModelInfo {
+                path: "test.gguf".into(),
+                tensors: 100,
+                layers: 32,
+                n_embd: 4096,
+                n_head: 32,
+                n_head_kv: 8,
+                vocab_size: 32000,
+                file_size_bytes: 4_000_000_000,
+                architecture: "llama".into(),
+            },
+            scenarios: vec![ScenarioResult {
+                name: "cold_load".into(),
+                description: "Cold layer load test".into(),
+                metrics: vec![Metric {
+                    name: "load_time_ms".into(),
+                    value: 5.5,
+                    unit: "ms".into(),
+                }],
+            }],
+            summary: BenchmarkSummary {
+                total_duration_ms: 100.0,
+                est_prefill_tok_per_sec: 50.0,
+                est_decode_tok_per_sec: 10.0,
+                ssd_bandwidth_mb_per_sec: 3000.0,
+                memory_budget_bytes: 8_589_934_592,
+                cache_efficiency_pct: 95.0,
+            },
+        };
+
+        let md = results.to_markdown();
+        assert!(md.contains("# ssd-llm Benchmark Report"));
+        assert!(md.contains("| Architecture | llama |"));
+        assert!(md.contains("### cold_load"));
+        assert!(md.contains("| SSD Bandwidth |"));
+    }
+
+    #[test]
+    fn test_benchmark_quantization_levels() {
+        let results = benchmark_quantization_levels(64, 64);
+        assert!(!results.is_empty());
+        // Should have results for 2, 3, 4, 8 bits × 2 alpha values = 8
+        assert_eq!(results.len(), 8);
+        // Higher bits should have lower MSE
+        let mse_4bit: f64 = results
+            .iter()
+            .filter(|r| r.bit_width == 4 && r.alpha < 0.01)
+            .map(|r| r.mse)
+            .next()
+            .unwrap_or(0.0);
+        let mse_8bit: f64 = results
+            .iter()
+            .filter(|r| r.bit_width == 8 && r.alpha < 0.01)
+            .map(|r| r.mse)
+            .next()
+            .unwrap_or(0.0);
+        assert!(mse_8bit <= mse_4bit, "8-bit should have <= MSE than 4-bit");
+    }
+
+    #[test]
+    fn test_quantization_report_markdown() {
+        let md = quantization_report_markdown(32, 32);
+        assert!(md.contains("# AWQ Quantization Comparison Report"));
+        assert!(md.contains("| Bits |"));
+        assert!(md.contains("RTN"));
     }
 }

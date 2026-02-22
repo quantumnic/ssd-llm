@@ -213,57 +213,160 @@ impl LoraAdapter {
     }
 }
 
-/// Manager for multiple LoRA adapters
+/// Manager for multiple LoRA adapters with hot-swapping support
 pub struct LoraManager {
-    adapters: Vec<LoraAdapter>,
+    /// Named adapters for hot-swap support: (name, adapter)
+    adapters: Vec<(String, LoraAdapter)>,
+    /// Set of currently active adapter names (subset of loaded adapters)
+    active: std::collections::HashSet<String>,
     /// Cache of merged deltas: tensor_name -> pre-computed delta vector
     delta_cache: HashMap<String, Vec<f32>>,
+    /// Generation counter — incremented on any adapter change, invalidates cache
+    generation: u64,
+    /// Generation at which delta_cache was last computed
+    cache_generation: u64,
 }
 
 impl LoraManager {
     pub fn new() -> Self {
         Self {
             adapters: Vec::new(),
+            active: std::collections::HashSet::new(),
             delta_cache: HashMap::new(),
+            generation: 0,
+            cache_generation: 0,
         }
     }
 
-    /// Load and add a LoRA adapter
+    /// Load and add a LoRA adapter with auto-generated name
     pub fn add_adapter(&mut self, path: &Path, scale: f32) -> Result<()> {
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("adapter_{}", self.adapters.len()));
+        self.add_named_adapter(&name, path, scale)
+    }
+
+    /// Load and add a LoRA adapter with explicit name
+    pub fn add_named_adapter(&mut self, name: &str, path: &Path, scale: f32) -> Result<()> {
+        // Remove existing adapter with same name if present
+        self.adapters.retain(|(n, _)| n != name);
+        self.active.remove(name);
+
         let adapter = LoraAdapter::load(path, scale)?;
-        self.adapters.push(adapter);
-        // Invalidate cache when adapters change
+        let name_str = name.to_string();
+        self.active.insert(name_str.clone());
+        self.adapters.push((name_str, adapter));
+        self.generation += 1;
         self.delta_cache.clear();
+        info!(
+            "Added and activated LoRA adapter '{}' from {}",
+            name,
+            path.display()
+        );
         Ok(())
     }
 
-    /// Apply all loaded LoRA adapters to a weight tensor in-place
+    /// Hot-swap: activate a loaded adapter by name (no-op if already active)
+    pub fn activate(&mut self, name: &str) -> Result<()> {
+        if !self.adapters.iter().any(|(n, _)| n == name) {
+            bail!("LoRA adapter '{}' not loaded", name);
+        }
+        if self.active.insert(name.to_string()) {
+            self.generation += 1;
+            self.delta_cache.clear();
+            info!("Activated LoRA adapter '{}'", name);
+        }
+        Ok(())
+    }
+
+    /// Hot-swap: deactivate an adapter by name (keeps it loaded for fast re-activation)
+    pub fn deactivate(&mut self, name: &str) -> Result<()> {
+        if !self.adapters.iter().any(|(n, _)| n == name) {
+            bail!("LoRA adapter '{}' not loaded", name);
+        }
+        if self.active.remove(name) {
+            self.generation += 1;
+            self.delta_cache.clear();
+            info!("Deactivated LoRA adapter '{}'", name);
+        }
+        Ok(())
+    }
+
+    /// Unload an adapter entirely (frees memory)
+    pub fn remove_adapter(&mut self, name: &str) -> Result<()> {
+        let before = self.adapters.len();
+        self.adapters.retain(|(n, _)| n != name);
+        self.active.remove(name);
+        if self.adapters.len() == before {
+            bail!("LoRA adapter '{}' not found", name);
+        }
+        self.generation += 1;
+        self.delta_cache.clear();
+        info!("Removed LoRA adapter '{}'", name);
+        Ok(())
+    }
+
+    /// Update the scale of a loaded adapter
+    pub fn set_scale(&mut self, name: &str, scale: f32) -> Result<()> {
+        for (n, adapter) in &mut self.adapters {
+            if n == name {
+                adapter.scale = scale;
+                self.generation += 1;
+                self.delta_cache.clear();
+                info!("Updated LoRA adapter '{}' scale to {}", name, scale);
+                return Ok(());
+            }
+        }
+        bail!("LoRA adapter '{}' not found", name);
+    }
+
+    /// Apply all *active* LoRA adapters to a weight tensor in-place
     pub fn apply_to_weight(&mut self, tensor_name: &str, weight: &mut [f32]) {
-        for adapter in &self.adapters {
+        for (name, adapter) in &self.adapters {
+            if !self.active.contains(name) {
+                continue;
+            }
             if let Some(lora_weight) = adapter.adapters.get(tensor_name) {
                 lora_weight.apply_to_weight(weight, adapter.alpha, adapter.scale);
             }
         }
     }
 
-    /// Check if any adapter has weights for this tensor
+    /// Check if any active adapter has weights for this tensor
     pub fn has_weight(&self, tensor_name: &str) -> bool {
         self.adapters
             .iter()
-            .any(|a| a.adapters.contains_key(tensor_name))
+            .filter(|(n, _)| self.active.contains(n))
+            .any(|(_, a)| a.adapters.contains_key(tensor_name))
     }
 
-    /// Get the number of loaded adapters
+    /// Get the number of loaded adapters (active + inactive)
     pub fn adapter_count(&self) -> usize {
         self.adapters.len()
+    }
+
+    /// Get the number of currently active adapters
+    pub fn active_count(&self) -> usize {
+        self.active.len()
+    }
+
+    /// List all loaded adapters with their status
+    pub fn list(&self) -> Vec<(String, bool)> {
+        self.adapters
+            .iter()
+            .map(|(n, _)| (n.clone(), self.active.contains(n)))
+            .collect()
     }
 
     /// Get summary info for all loaded adapters
     pub fn summary(&self) -> Vec<LoraAdapterInfo> {
         self.adapters
             .iter()
-            .map(|a| LoraAdapterInfo {
+            .map(|(name, a)| LoraAdapterInfo {
                 path: a.path.display().to_string(),
+                name: name.clone(),
+                active: self.active.contains(name),
                 rank: a.rank,
                 alpha: a.alpha,
                 scale: a.scale,
@@ -288,6 +391,8 @@ impl Default for LoraManager {
 #[derive(Debug, Clone)]
 pub struct LoraAdapterInfo {
     pub path: String,
+    pub name: String,
+    pub active: bool,
     pub rank: usize,
     pub alpha: f32,
     pub scale: f32,
@@ -367,6 +472,7 @@ mod tests {
         let mgr = LoraManager::new();
         assert!(mgr.is_empty());
         assert_eq!(mgr.adapter_count(), 0);
+        assert_eq!(mgr.active_count(), 0);
         assert!(!mgr.has_weight("blk.0.attn_q.weight"));
     }
 
@@ -374,6 +480,8 @@ mod tests {
     fn test_lora_adapter_info() {
         let info = LoraAdapterInfo {
             path: "/tmp/adapter.gguf".to_string(),
+            name: "test_adapter".to_string(),
+            active: true,
             rank: 16,
             alpha: 32.0,
             scale: 1.0,
@@ -381,5 +489,22 @@ mod tests {
         };
         assert_eq!(info.rank, 16);
         assert!((info.alpha - 32.0).abs() < 1e-6);
+        assert!(info.active);
+        assert_eq!(info.name, "test_adapter");
+    }
+
+    #[test]
+    fn test_lora_manager_hot_swap_api() {
+        // Test the hot-swap API surface without loading real GGUF files
+        let mgr = LoraManager::new();
+        assert!(mgr.is_empty());
+        assert_eq!(mgr.list().len(), 0);
+
+        // activate/deactivate should fail on non-existent adapters
+        let mut mgr = LoraManager::new();
+        assert!(mgr.activate("nonexistent").is_err());
+        assert!(mgr.deactivate("nonexistent").is_err());
+        assert!(mgr.remove_adapter("nonexistent").is_err());
+        assert!(mgr.set_scale("nonexistent", 0.5).is_err());
     }
 }

@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod awq;
 pub mod chat;
 
 pub mod batch_scheduler;
