@@ -323,7 +323,7 @@ fn forward_pass(
 }
 
 /// Detect MoE configuration from GGUF metadata
-fn detect_moe_config(gguf: &GgufFile) -> Option<MoeConfig> {
+pub fn detect_moe_config(gguf: &GgufFile) -> Option<MoeConfig> {
     if gguf.is_moe() {
         let config = MoeConfig::new(gguf.n_experts() as usize, gguf.n_experts_used() as usize);
         if config.validate() {
@@ -340,7 +340,7 @@ fn detect_moe_config(gguf: &GgufFile) -> Option<MoeConfig> {
 /// Run FFN or MoE-FFN depending on layer tensors.
 /// For MoE: uses gating network to select top-K experts, runs only those.
 /// For dense: runs standard SwiGLU FFN.
-fn run_ffn_or_moe(
+pub fn run_ffn_or_moe(
     ffn_input: &[f32],
     cached: &CachedLayer,
     layer_idx: u32,
@@ -404,7 +404,7 @@ fn run_ffn_or_moe(
 }
 
 /// Helper: find a tensor in a cached layer by suffix
-fn find_tensor_in_layer<'a>(
+pub fn find_tensor_in_layer<'a>(
     cached: &'a CachedLayer,
     suffix: &str,
     layer_idx: u32,
@@ -428,7 +428,7 @@ fn apply_lora_to_layer(cached: &mut CachedLayer, lora: &mut LoraManager) {
 
 /// RMS Normalization in-place
 #[allow(clippy::ptr_arg)]
-fn rms_norm(x: &mut Vec<f32>, weight: &[f32]) {
+pub fn rms_norm(x: &mut Vec<f32>, weight: &[f32]) {
     crate::metal::compute::rmsnorm_f32_fast(x, weight, 1e-5);
 }
 

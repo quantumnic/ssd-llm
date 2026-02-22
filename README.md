@@ -76,6 +76,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **📝 GBNF Grammar Constraints** — llama.cpp-compatible grammar-constrained generation for arbitrary structured output (SQL, XML, custom formats)
 - **👁️ Vision/Multimodal** — CLIP ViT encoder for LLaVA-style image understanding, OpenAI-compatible image_url content, base64 and URL image input
 - **🧬 I-Quant Support (IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS)** — Importance-matrix quantization dequantization with grid lookup tables and non-linear LUTs, CPU + Metal GPU kernels, for higher quality-per-bit than traditional K-quants
+- **📊 Perplexity Evaluation** — `ssd-llm perplexity` measures model quality with sliding-window NLL computation, per-chunk stats, JSON output for CI/CD, quantization quality comparison
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start
@@ -98,6 +99,11 @@ ssd-llm run model.gguf --memory-budget 8G --prompt "Explain quantum computing"
 
 # Benchmark SSD streaming performance
 ssd-llm bench model.gguf --memory-budget 8G
+
+# Evaluate perplexity (measure quantization quality)
+ssd-llm perplexity model.gguf wiki.txt --memory-budget 8G
+ssd-llm perplexity model.gguf wiki.txt --context-size 512 --stride 256 --verbose
+ssd-llm perplexity model.gguf wiki.txt --json  # CI/CD integration
 
 # Start Ollama-compatible API server
 ssd-llm serve model.gguf --memory-budget 8G --port 11434

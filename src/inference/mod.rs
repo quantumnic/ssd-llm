@@ -13,6 +13,7 @@ pub mod lora;
 pub mod mmap_kv_cache;
 pub mod moe;
 pub mod paged_attention;
+pub mod perplexity;
 pub mod prompt_cache;
 pub mod quantized_kv_cache;
 pub mod rope_scaling;

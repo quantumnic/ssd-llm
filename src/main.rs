@@ -285,6 +285,34 @@ enum Commands {
         #[arg(long, default_value_t = 1.0)]
         lora_scale: f32,
     },
+    /// Evaluate perplexity on a text file (measure model quality)
+    Perplexity {
+        /// Path to GGUF model file
+        model: PathBuf,
+
+        /// Path to text file to evaluate
+        file: PathBuf,
+
+        /// Memory budget for layer cache (e.g. "8G", "4G", "512M")
+        #[arg(long, default_value = "8G")]
+        memory_budget: String,
+
+        /// Context window size (0 = use model's n_ctx)
+        #[arg(long, default_value_t = 0)]
+        context_size: usize,
+
+        /// Stride for sliding window (0 = context_size / 2)
+        #[arg(long, default_value_t = 0)]
+        stride: usize,
+
+        /// Show per-chunk perplexity values
+        #[arg(long, default_value_t = false)]
+        verbose: bool,
+
+        /// Output results as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Generate or show configuration
     Config {
         /// Generate a default config file
@@ -834,6 +862,67 @@ fn main() -> Result<()> {
             );
 
             inference::chat::run_interactive(&gguf, &loader, &mut cache, &chat_config)?;
+        }
+
+        Commands::Perplexity {
+            model,
+            file,
+            memory_budget,
+            context_size,
+            stride,
+            verbose,
+            json,
+        } => {
+            let budget = parse_memory_budget(&memory_budget)?;
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", file.display(), e))?;
+
+            if text.is_empty() {
+                anyhow::bail!("Input file is empty: {}", file.display());
+            }
+
+            let gguf = model::gguf::GgufFile::open(&model)?;
+            println!(
+                "Model: {} ({} layers, {} embd, ctx {})",
+                model.display(),
+                gguf.n_layers(),
+                gguf.n_embd(),
+                gguf.n_ctx()
+            );
+            println!("Input: {} ({} bytes)", file.display(), text.len());
+
+            let streamer = ssd::streamer::SsdStreamer::new(&model, budget)?;
+            let mut layer_cache = model::cache::LayerCache::new(budget);
+
+            let config = inference::perplexity::PerplexityConfig {
+                context_size,
+                stride,
+                verbose,
+            };
+
+            println!("Evaluating perplexity...\n");
+            let result = inference::perplexity::evaluate_perplexity(
+                &gguf,
+                &streamer,
+                &mut layer_cache,
+                &text,
+                &config,
+            )?;
+
+            if json {
+                println!("{}", result.to_json());
+            } else {
+                println!("=== Perplexity Results ===");
+                println!("  Perplexity:       {:.4}", result.perplexity);
+                println!("  Avg NLL:          {:.6}", result.nll);
+                println!(
+                    "  Tokens evaluated: {} / {}",
+                    result.tokens_evaluated, result.total_tokens
+                );
+                println!("  Chunks:           {}", result.chunks);
+                println!("  Time:             {:.2}s", result.elapsed_secs);
+                println!("  Throughput:       {:.1} tok/s", result.tokens_per_sec);
+            }
         }
 
         Commands::Config { init } => {
