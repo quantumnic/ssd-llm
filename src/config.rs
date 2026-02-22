@@ -52,6 +52,7 @@ pub struct InferenceConfig {
     pub mirostat_tau: f32,
     pub mirostat_eta: f32,
     pub grammar: String,
+    pub adaptive_memory: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +93,7 @@ impl Default for Config {
                 mirostat_tau: 5.0,
                 mirostat_eta: 0.1,
                 grammar: String::new(),
+                adaptive_memory: false,
             },
             paths: PathsConfig {
                 model_dir: PathBuf::from("models"),
@@ -193,6 +195,9 @@ impl Config {
                 }
                 "inference.mirostat_eta" => {
                     config.inference.mirostat_eta = value.parse().unwrap_or(0.1);
+                }
+                "inference.adaptive_memory" => {
+                    config.inference.adaptive_memory = value == "true";
                 }
                 "paths.model_dir" => config.paths.model_dir = PathBuf::from(value),
                 _ => {} // ignore unknown keys

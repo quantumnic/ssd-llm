@@ -220,6 +220,10 @@ enum Commands {
         /// Quantize KV blocks to INT8 when swapping to SSD (4x less I/O)
         #[arg(long, default_value_t = false)]
         swap_quantize: bool,
+
+        /// Enable adaptive memory pressure monitoring (auto-adjusts cache budget based on system RAM)
+        #[arg(long, default_value_t = false)]
+        adaptive_memory: bool,
     },
     /// Download a GGUF model from Hugging Face
     Pull {
@@ -319,6 +323,16 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         init: bool,
     },
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} bytes", bytes)
+    }
 }
 
 fn parse_memory_budget(s: &str) -> Result<usize> {
@@ -688,8 +702,25 @@ fn main() -> Result<()> {
             paged_kv_blocks,
             paged_block_size,
             swap_quantize,
+            adaptive_memory,
         } => {
             let budget = parse_memory_budget(&memory_budget)?;
+
+            // Start memory pressure monitor if requested
+            let _pressure_monitor = if adaptive_memory {
+                let monitor = ssd::memory_pressure::MemoryPressureMonitor::start_default();
+                if let Some(snap) = ssd::memory_pressure::MemoryPressureMonitor::snapshot() {
+                    println!(
+                        "🧠 Adaptive memory: {} total, {} available ({})",
+                        format_bytes(snap.total_bytes),
+                        format_bytes(snap.available_bytes),
+                        snap.pressure,
+                    );
+                }
+                Some(monitor)
+            } else {
+                None
+            };
             let tp_shards = if tensor_parallel > 0 {
                 tensor_parallel
             } else {
@@ -944,6 +975,7 @@ fn main() -> Result<()> {
                         println!("Flash attention: {}", cfg.inference.flash_attention);
                         println!("KV quantization: {}", cfg.inference.kv_quantize);
                         println!("Swap quantization: {}", cfg.inference.swap_quantize);
+                        println!("Adaptive memory: {}", cfg.inference.adaptive_memory);
                         println!("Sliding window: {}", cfg.inference.sliding_window);
                         println!("Model directory: {}", cfg.paths.model_dir.display());
                     }

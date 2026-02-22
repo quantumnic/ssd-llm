@@ -28,6 +28,12 @@ pub struct MetricsCollector {
     pub cache_misses: AtomicU64,
     pub cache_evictions: AtomicU64,
     pub ssd_bytes_read: AtomicU64,
+    /// Current memory pressure level (0=normal, 1=warning, 2=critical, 3=urgent)
+    pub memory_pressure_level: AtomicU64,
+    /// Available system memory in bytes (last reading)
+    pub memory_available_bytes: AtomicU64,
+    /// Total system memory in bytes
+    pub memory_total_bytes: AtomicU64,
     latencies_ms: Mutex<Vec<f64>>,
 }
 
@@ -45,6 +51,9 @@ impl MetricsCollector {
             cache_misses: AtomicU64::new(0),
             cache_evictions: AtomicU64::new(0),
             ssd_bytes_read: AtomicU64::new(0),
+            memory_pressure_level: AtomicU64::new(0),
+            memory_available_bytes: AtomicU64::new(0),
+            memory_total_bytes: AtomicU64::new(0),
             latencies_ms: Mutex::new(Vec::new()),
         }
     }
@@ -94,6 +103,13 @@ impl MetricsCollector {
         self.ssd_bytes_read.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    pub fn update_memory_pressure(&self, level: u64, available: u64, total: u64) {
+        self.memory_pressure_level.store(level, Ordering::Relaxed);
+        self.memory_available_bytes
+            .store(available, Ordering::Relaxed);
+        self.memory_total_bytes.store(total, Ordering::Relaxed);
+    }
+
     /// Generate health check JSON
     pub fn health_json(&self, model_name: &str, model_loaded: bool) -> String {
         let uptime_secs = self.start_time.elapsed().as_secs();
@@ -120,6 +136,9 @@ impl MetricsCollector {
         let misses = self.cache_misses.load(Ordering::Relaxed);
         let evictions = self.cache_evictions.load(Ordering::Relaxed);
         let ssd_bytes = self.ssd_bytes_read.load(Ordering::Relaxed);
+        let mem_pressure = self.memory_pressure_level.load(Ordering::Relaxed);
+        let mem_available = self.memory_available_bytes.load(Ordering::Relaxed);
+        let mem_total = self.memory_total_bytes.load(Ordering::Relaxed);
 
         let avg_latency_ms = if total_req > 0 {
             total_inf_us as f64 / 1000.0 / total_req as f64
@@ -151,7 +170,8 @@ impl MetricsCollector {
                 "\"tokens\":{{\"prompt_total\":{},\"generated_total\":{},\"throughput_tok_s\":{:.2}}},",
                 "\"latency_ms\":{{\"avg\":{:.2},\"p50\":{:.2},\"p95\":{:.2},\"p99\":{:.2}}},",
                 "\"cache\":{{\"hits\":{},\"misses\":{},\"evictions\":{},\"hit_rate_pct\":{:.1}}},",
-                "\"ssd\":{{\"bytes_read\":{},\"read_mb\":{:.2}}}",
+                "\"ssd\":{{\"bytes_read\":{},\"read_mb\":{:.2}}},",
+                "\"memory\":{{\"pressure_level\":{},\"available_bytes\":{},\"total_bytes\":{}}}",
                 "}}"
             ),
             model_name,
@@ -162,6 +182,7 @@ impl MetricsCollector {
             avg_latency_ms, p50, p95, p99,
             hits, misses, evictions, cache_hit_rate,
             ssd_bytes, ssd_bytes as f64 / (1024.0 * 1024.0),
+            mem_pressure, mem_available, mem_total,
         )
     }
 
@@ -176,6 +197,8 @@ impl MetricsCollector {
         let misses = self.cache_misses.load(Ordering::Relaxed);
         let evictions = self.cache_evictions.load(Ordering::Relaxed);
         let ssd_bytes = self.ssd_bytes_read.load(Ordering::Relaxed);
+        let mem_pressure = self.memory_pressure_level.load(Ordering::Relaxed);
+        let mem_available = self.memory_available_bytes.load(Ordering::Relaxed);
         let uptime = self.start_time.elapsed().as_secs();
 
         format!(
@@ -210,6 +233,12 @@ impl MetricsCollector {
                 "# HELP ssd_llm_ssd_bytes_read_total Total bytes read from SSD\n",
                 "# TYPE ssd_llm_ssd_bytes_read_total counter\n",
                 "ssd_llm_ssd_bytes_read_total{{model=\"{}\"}} {}\n",
+                "# HELP ssd_llm_memory_pressure_level Current memory pressure (0=normal,1=warning,2=critical,3=urgent)\n",
+                "# TYPE ssd_llm_memory_pressure_level gauge\n",
+                "ssd_llm_memory_pressure_level{{model=\"{}\"}} {}\n",
+                "# HELP ssd_llm_memory_available_bytes Available system memory in bytes\n",
+                "# TYPE ssd_llm_memory_available_bytes gauge\n",
+                "ssd_llm_memory_available_bytes{{model=\"{}\"}} {}\n",
             ),
             model_name,
             uptime,
@@ -231,6 +260,10 @@ impl MetricsCollector {
             evictions,
             model_name,
             ssd_bytes,
+            model_name,
+            mem_pressure,
+            model_name,
+            mem_available,
         )
     }
 
