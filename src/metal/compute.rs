@@ -180,6 +180,8 @@ impl MetalCompute {
                     GgmlType::IQ3S => return gpu.matvec_iq3_s(w_raw, x, out_dim, in_dim),
                     GgmlType::IQ2XXS => return gpu.matvec_iq2_xxs(w_raw, x, out_dim, in_dim),
                     GgmlType::IQ2XS => return gpu.matvec_iq2_xs(w_raw, x, out_dim, in_dim),
+                    GgmlType::BF16 => return gpu.matvec_bf16(w_raw, x, out_dim, in_dim),
+                    GgmlType::F16 => return gpu.matvec_f16(w_raw, x, out_dim, in_dim),
                     _ => {}
                 }
             }
@@ -337,6 +339,8 @@ pub fn matvec_quantized_cpu(
         GgmlType::IQ3S => matvec_iq3_s_cpu(w_raw, x, out_dim, in_dim),
         GgmlType::IQ2XXS => matvec_iq2_xxs_cpu(w_raw, x, out_dim, in_dim),
         GgmlType::IQ2XS => matvec_iq2_xs_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::BF16 => matvec_bf16_cpu(w_raw, x, out_dim, in_dim),
+        GgmlType::F16 => matvec_f16_cpu(w_raw, x, out_dim, in_dim),
         _ => {
             debug!("Unsupported quant type {:?}, returning zeros", dtype);
             vec![0.0; out_dim]
@@ -1913,6 +1917,45 @@ fn f16_to_f32(lo: u8, hi: u8) -> f32 {
     half::f16::from_bits(lo as u16 | ((hi as u16) << 8)).to_f32()
 }
 
+/// Convert BF16 (brain float 16) to f32
+/// BF16 is simply the upper 16 bits of f32, so we shift left by 16
+fn bf16_to_f32(lo: u8, hi: u8) -> f32 {
+    let bits = (lo as u32) | ((hi as u32) << 8);
+    f32::from_bits(bits << 16)
+}
+
+/// CPU BF16 matvec: each weight is 2 bytes (BF16), dequantize on the fly
+fn matvec_bf16_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let mut y = vec![0.0f32; out_dim];
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * in_dim * 2;
+        let mut sum = 0.0f32;
+        for (col, &xv) in x.iter().enumerate().take(in_dim) {
+            let off = row_off + col * 2;
+            let w_f32 = bf16_to_f32(w[off], w[off + 1]);
+            sum += w_f32 * xv;
+        }
+        *y_val = sum;
+    }
+    y
+}
+
+/// CPU F16 matvec: each weight is 2 bytes (IEEE 754 half), dequantize on the fly
+fn matvec_f16_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let mut y = vec![0.0f32; out_dim];
+    for (row, y_val) in y.iter_mut().enumerate() {
+        let row_off = row * in_dim * 2;
+        let mut sum = 0.0f32;
+        for (col, &xv) in x.iter().enumerate().take(in_dim) {
+            let off = row_off + col * 2;
+            let w_f32 = f16_to_f32(w[off], w[off + 1]);
+            sum += w_f32 * xv;
+        }
+        *y_val = sum;
+    }
+    y
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2602,6 +2645,69 @@ mod tests {
         let y = matvec_quantized_cpu(&block, &x, 1, 256, GgmlType::IQ2XS);
         assert_eq!(y.len(), 1);
         assert!((y[0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bf16_conversion() {
+        // BF16 for 1.0 = 0x3F80 (upper 16 bits of f32 1.0 = 0x3F800000)
+        assert!((bf16_to_f32(0x80, 0x3F) - 1.0).abs() < 1e-6);
+        // BF16 for -2.0 = 0xC000
+        assert!((bf16_to_f32(0x00, 0xC0) - (-2.0)).abs() < 1e-6);
+        // BF16 for 0.0 = 0x0000
+        assert!((bf16_to_f32(0x00, 0x00) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_matvec_bf16_cpu() {
+        // 2x2 identity matrix in BF16
+        // 1.0 BF16 = 0x3F80, 0.0 BF16 = 0x0000
+        let w: Vec<u8> = vec![
+            0x80, 0x3F, 0x00, 0x00, // row 0: [1.0, 0.0]
+            0x00, 0x00, 0x80, 0x3F, // row 1: [0.0, 1.0]
+        ];
+        let x = vec![3.0, 7.0];
+        let y = matvec_bf16_cpu(&w, &x, 2, 2);
+        assert!((y[0] - 3.0).abs() < 1e-2);
+        assert!((y[1] - 7.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn test_matvec_bf16_dispatch() {
+        // Test through the dispatch path
+        let w: Vec<u8> = vec![
+            0x80, 0x3F, 0x00, 0x40, // row 0: [1.0, 2.0]
+            0x40, 0x40, 0x80, 0x40, // row 1: [3.0, 4.0]
+        ];
+        let x = vec![1.0, 1.0];
+        let y = matvec_quantized_cpu(&w, &x, 2, 2, GgmlType::BF16);
+        assert!((y[0] - 3.0).abs() < 1e-2);
+        assert!((y[1] - 7.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn test_matvec_f16_cpu() {
+        // 2x2 identity matrix in F16
+        // 1.0 F16 = 0x3C00, 0.0 F16 = 0x0000
+        let w: Vec<u8> = vec![
+            0x00, 0x3C, 0x00, 0x00, // row 0: [1.0, 0.0]
+            0x00, 0x00, 0x00, 0x3C, // row 1: [0.0, 1.0]
+        ];
+        let x = vec![5.0, 9.0];
+        let y = matvec_f16_cpu(&w, &x, 2, 2);
+        assert!((y[0] - 5.0).abs() < 1e-2);
+        assert!((y[1] - 9.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn test_matvec_f16_dispatch() {
+        let w: Vec<u8> = vec![
+            0x00, 0x3C, 0x00, 0x40, // row 0: [1.0, 2.0]
+            0x00, 0x42, 0x00, 0x44, // row 1: [3.0, 4.0]
+        ];
+        let x = vec![1.0, 1.0];
+        let y = matvec_quantized_cpu(&w, &x, 2, 2, GgmlType::F16);
+        assert!((y[0] - 3.0).abs() < 1e-2);
+        assert!((y[1] - 7.0).abs() < 1e-2);
     }
 
     #[test]

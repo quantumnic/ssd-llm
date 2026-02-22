@@ -78,6 +78,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🧬 I-Quant Support (IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS)** — Importance-matrix quantization dequantization with grid lookup tables and non-linear LUTs, CPU + Metal GPU kernels, for higher quality-per-bit than traditional K-quants
 - **📊 Perplexity Evaluation** — `ssd-llm perplexity` measures model quality with sliding-window NLL computation, per-chunk stats, JSON output for CI/CD, quantization quality comparison
 - **🧠 Adaptive Memory Pressure** — Real-time macOS VM pressure monitoring via `host_statistics64`, automatic cache budget scaling (100%→25%), smart prefetch throttling, Prometheus metrics for memory state
+- **🔢 BF16 & F16 Matvec** — Native BF16 (brain float 16) and F16 (IEEE 754 half) matrix-vector multiply on CPU and Metal GPU, enabling direct inference from unquantized model weights without dequantization overhead
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start

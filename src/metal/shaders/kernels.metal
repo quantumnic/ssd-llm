@@ -1292,3 +1292,52 @@ kernel void matvec_iq2_xs(
 
     y[tid] = sum;
 }
+
+// BF16 matvec: each weight is 2 bytes (brain float 16)
+// BF16 = upper 16 bits of f32, so we shift left by 16 to get f32
+kernel void matvec_bf16(
+    device const uchar* W_quantized  [[buffer(0)]],
+    device const float* x            [[buffer(1)]],
+    device float* y                  [[buffer(2)]],
+    constant uint& out_dim           [[buffer(3)]],
+    constant uint& in_dim            [[buffer(4)]],
+    uint tid                         [[thread_position_in_grid]]
+) {
+    if (tid >= out_dim) return;
+
+    uint row_offset = tid * in_dim * 2;
+    float sum = 0.0;
+
+    for (uint col = 0; col < in_dim; col++) {
+        uint off = row_offset + col * 2;
+        ushort bits = ushort(W_quantized[off]) | (ushort(W_quantized[off + 1]) << 8);
+        float w = as_type<float>(uint(bits) << 16);
+        sum += w * x[col];
+    }
+
+    y[tid] = sum;
+}
+
+// F16 matvec: each weight is 2 bytes (IEEE 754 half precision)
+kernel void matvec_f16(
+    device const uchar* W_quantized  [[buffer(0)]],
+    device const float* x            [[buffer(1)]],
+    device float* y                  [[buffer(2)]],
+    constant uint& out_dim           [[buffer(3)]],
+    constant uint& in_dim            [[buffer(4)]],
+    uint tid                         [[thread_position_in_grid]]
+) {
+    if (tid >= out_dim) return;
+
+    uint row_offset = tid * in_dim * 2;
+    float sum = 0.0;
+
+    for (uint col = 0; col < in_dim; col++) {
+        uint off = row_offset + col * 2;
+        ushort bits = ushort(W_quantized[off]) | (ushort(W_quantized[off + 1]) << 8);
+        float w = float(as_type<half>(bits));
+        sum += w * x[col];
+    }
+
+    y[tid] = sum;
+}

@@ -105,6 +105,14 @@ fn dequantize_to_f32(data: &[u8], dtype: &GgmlType, n_elements: usize) -> Result
                 .map(|&h| half::f16::from_bits(h).to_f32())
                 .collect())
         }
+        GgmlType::BF16 => {
+            let halfs: &[u16] =
+                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u16, n_elements) };
+            Ok(halfs
+                .iter()
+                .map(|&h| f32::from_bits((h as u32) << 16))
+                .collect())
+        }
         GgmlType::Q8_0 => dequantize_q8_0(data, n_elements),
         GgmlType::Q4_0 => dequantize_q4_0(data, n_elements),
         _ => {
