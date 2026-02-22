@@ -75,7 +75,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🧩 Mixture of Experts (MoE)** — Sparse expert routing for models like Mixtral 8x7B/8x22B: top-K gating, SSD-friendly on-demand expert loading, batch expert pre-selection, Metal gating shader
 - **📝 GBNF Grammar Constraints** — llama.cpp-compatible grammar-constrained generation for arbitrary structured output (SQL, XML, custom formats)
 - **👁️ Vision/Multimodal** — CLIP ViT encoder for LLaVA-style image understanding, OpenAI-compatible image_url content, base64 and URL image input
-- **🧬 I-Quant Support (IQ4_NL, IQ4_XS)** — Importance-matrix quantization dequantization with non-linear lookup tables, CPU + Metal GPU kernels, for higher quality-per-bit than traditional K-quants
+- **🧬 I-Quant Support (IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS)** — Importance-matrix quantization dequantization with grid lookup tables and non-linear LUTs, CPU + Metal GPU kernels, for higher quality-per-bit than traditional K-quants
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
 ## Quick Start

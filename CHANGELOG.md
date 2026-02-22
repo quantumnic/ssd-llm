@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.20.0 — IQ3_XXS and IQ3_S Dequantization — Ultra-Low-Bit I-Quant Support (2026-02-22)
+
+### Added
+- **IQ3_XXS dequantization**: Full CPU and Metal GPU dequant-matvec for IQ3_XXS quantized tensors (3.0625 bpw, 98B per 256-element block, grid-based importance-matrix quantization)
+- **IQ3_S dequantization**: Full CPU and Metal GPU dequant-matvec for IQ3_S quantized tensors (3.4375 bpw, 110B per 256-element block, 512-entry grid with per-element sign bits and 4-bit scales)
+- **IQ3_XXS grid lookup table**: 256-entry `iq3xxs_grid` table (from llama.cpp) for both CPU (Rust) and GPU (Metal) paths
+- **IQ3_S grid lookup table**: 512-entry `iq3s_grid` table (from llama.cpp) for both CPU (Rust) and GPU (Metal) paths
+- **Sign/mask tables**: `ksigns_iq2xs` (128-entry sign lookup) and `kmask_iq2xs` (8-entry bit mask) for IQ3 sign extraction, shared across CPU and Metal
+- **Metal shaders**: `matvec_iq3_xxs` and `matvec_iq3_s` GPU kernels with grid-based dequantization for Apple Silicon acceleration
+- **GPU dispatch**: Automatic Metal GPU dispatch for IQ3_XXS and IQ3_S
+- **7 new tests** (310 total): IQ3_XXS basic, signs, grid lookup; IQ3_S basic, scale, signs, grid lookup — all passing
+
+### Technical Details
+- IQ3_XXS: 8 groups of 32 elements per block; each group has 8 grid indices (into 256-entry table of 4-byte vectors) + 4-byte u32 encoding 4×7-bit sign indices and 4-bit scale
+- IQ3_S: 4 pairs of 32-element groups; 8-bit + 1-bit grid indices (into 512-entry table), explicit 8-bit sign masks per sub-group, 4-bit scales per pair
+- Both formats achieve better quality-per-bit than Q3_K at similar or smaller size, using importance-matrix optimized codebooks
+
+### Why This Matters
+IQ3_XXS at 3.06 bpw enables running 70B+ models in ~25GB — critical for 32GB Macs. IQ3_S at 3.44 bpw offers near-Q4 quality at Q3 size. These are among the most popular quantization formats on Hugging Face for constrained hardware. With this release, **ssd-llm supports IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS** on both CPU and Metal GPU, covering the most widely-used I-Quant formats.
+
+### Changed
+- `matvec_quantized` dispatch now routes IQ3_XXS and IQ3_S to GPU when Metal is available
+- `matvec_quantized_cpu` dispatch now handles IQ3_XXS and IQ3_S (previously returned zeros)
+- GGUF `block_size()` and `type_size()` now return correct values for IQ3_XXS (256/98) and IQ3_S (256/110)
+- README updated to reflect expanded I-Quant support
+- Cargo.toml version bumped to 1.20.0
+
 ## v1.18.0 — Quantized Block Swapping — INT8 Compression for SSD I/O (2026-02-21)
 
 ### Added
