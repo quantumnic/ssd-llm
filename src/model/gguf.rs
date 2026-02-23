@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
-const GGUF_MAGIC: u32 = 0x46475547; // "GGUF" in little-endian
+const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in little-endian
 
 /// GGUF tensor types
 #[derive(Debug, Clone, Copy, PartialEq)]
