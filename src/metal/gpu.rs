@@ -52,6 +52,7 @@ struct GpuPipelines {
     silu_f32: ComputePipelineState,
     elementwise_mul: ComputePipelineState,
     flash_attention_f32: ComputePipelineState,
+    fused_swiglu_f32: ComputePipelineState,
 }
 
 unsafe impl Send for MetalGpu {}
@@ -128,7 +129,13 @@ impl MetalGpu {
             silu_f32: make_pipeline("silu_f32")?,
             elementwise_mul: make_pipeline("elementwise_mul_f32")?,
             flash_attention_f32: make_pipeline("flash_attention_f32")?,
+            fused_swiglu_f32: make_pipeline("fused_swiglu_f32")?,
         })
+    }
+
+    /// Whether Metal GPU is available
+    pub fn is_available(&self) -> bool {
+        self.available
     }
 
     /// Whether GPU dispatch is available and beneficial for this size
@@ -588,6 +595,60 @@ impl MetalGpu {
         let size = (count * std::mem::size_of::<T>()) as u64;
         self.device
             .new_buffer(size, MTLResourceOptions::StorageModeShared)
+    }
+
+    /// Fused SwiGLU feed-forward on GPU: gate_proj + silu + up_proj + mul + down_proj
+    /// Returns the FFN output vector of size n_embd.
+    #[cfg(target_os = "macos")]
+    pub fn feed_forward_f32(
+        &self,
+        x: &[f32],
+        w_gate: &[f32],
+        w_up: &[f32],
+        w_down: &[f32],
+        n_embd: usize,
+    ) -> Vec<f32> {
+        let n_ff = w_gate.len() / n_embd;
+        if n_ff == 0 {
+            return vec![0.0f32; n_embd];
+        }
+
+        // Phase 1: Fused SwiGLU — gate + silu + up + mul in one dispatch
+        let w_gate_buf = self.create_buffer_with_data(w_gate);
+        let w_up_buf = self.create_buffer_with_data(w_up);
+        let x_buf = self.create_buffer_with_data(x);
+        let intermediate_buf = self.create_buffer::<f32>(n_ff);
+        let n_ff_buf = self.create_buffer_with_data(&[n_ff as u32]);
+        let n_embd_buf = self.create_buffer_with_data(&[n_embd as u32]);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.fused_swiglu_f32);
+        encoder.set_buffer(0, Some(&w_gate_buf), 0);
+        encoder.set_buffer(1, Some(&w_up_buf), 0);
+        encoder.set_buffer(2, Some(&x_buf), 0);
+        encoder.set_buffer(3, Some(&intermediate_buf), 0);
+        encoder.set_buffer(4, Some(&n_ff_buf), 0);
+        encoder.set_buffer(5, Some(&n_embd_buf), 0);
+
+        let threads = MTLSize::new(n_ff as u64, 1, 1);
+        let tg = MTLSize::new(
+            (self
+                .pipelines
+                .fused_swiglu_f32
+                .max_total_threads_per_threadgroup())
+            .min(n_ff as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(threads, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        // Phase 2: down_proj matvec — reuse existing GPU matvec
+        let intermediate = self.read_buffer::<f32>(&intermediate_buf, n_ff);
+        self.matvec_f32(w_down, &intermediate, n_embd, n_ff)
     }
 
     #[cfg(target_os = "macos")]

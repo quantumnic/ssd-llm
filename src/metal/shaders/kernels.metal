@@ -1439,3 +1439,36 @@ kernel void flash_attention_f32(
         }
     }
 }
+
+// ============================================================
+// Fused SwiGLU: out[row] = silu(dot(w_gate[row], x)) * dot(w_up[row], x)
+// Each thread computes one output element of the intermediate vector.
+// Fuses gate_proj matvec + silu + up_proj matvec + element-wise multiply
+// into a single dispatch, halving memory round-trips.
+// ============================================================
+kernel void fused_swiglu_f32(
+    device const float* w_gate   [[buffer(0)]],  // [n_ff, n_embd]
+    device const float* w_up     [[buffer(1)]],  // [n_ff, n_embd]
+    device const float* x        [[buffer(2)]],  // [n_embd]
+    device float* out            [[buffer(3)]],  // [n_ff]
+    constant uint& n_ff          [[buffer(4)]],
+    constant uint& n_embd        [[buffer(5)]],
+    uint tid                     [[thread_position_in_grid]]
+) {
+    if (tid >= n_ff) return;
+
+    const uint row_off = tid * n_embd;
+    float gate_dot = 0.0;
+    float up_dot = 0.0;
+
+    // Fused dot products: read x once, accumulate both projections
+    for (uint i = 0; i < n_embd; i++) {
+        float xi = x[i];
+        gate_dot += w_gate[row_off + i] * xi;
+        up_dot   += w_up[row_off + i]   * xi;
+    }
+
+    // SiLU(gate) * up
+    float silu_gate = gate_dot / (1.0 + exp(-gate_dot));
+    out[tid] = silu_gate * up_dot;
+}
