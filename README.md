@@ -82,11 +82,42 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **📌 Adaptive Layer Pinning** — Automatic hot-layer detection: tracks per-layer access frequency with exponential decay, auto-pins the N hottest layers in RAM (e.g., embeddings, early attention), configurable via `--adaptive-pin N`
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 
+## Installation
+
+### Prerequisites
+
+You need [Rust](https://www.rust-lang.org/tools/install) installed:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Make sure `~/.cargo/bin` is in your PATH (restart your terminal or run `source ~/.cargo/env`).
+
+### Build & Install
+
+```bash
+# Clone the repo
+git clone https://github.com/redbasecap-buiss/ssd-llm.git
+cd ssd-llm
+
+# Build and install to ~/.cargo/bin (available as `ssd-llm` globally)
+cargo install --path .
+
+# Verify
+ssd-llm --help
+```
+
+Or build without installing:
+
+```bash
+cargo build --release
+# Binary at: ./target/release/ssd-llm
+```
+
 ## Quick Start
 
 ```bash
-# Build
-cargo build --release
 
 # Download a model from Hugging Face
 ssd-llm pull TheBloke/Llama-2-7B-GGUF:llama-2-7b.Q4_0.gguf
