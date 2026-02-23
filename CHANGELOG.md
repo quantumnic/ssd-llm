@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.28.0 — Metal Flash Attention — Fused GPU Attention Kernel (2026-02-23)
+
+### Added
+- **Metal Flash Attention kernel**: `flash_attention_f32` Metal compute shader that fuses Q·K^T scoring, online softmax (Milakov & Gimelshein, 2018), and V accumulation into a single GPU dispatch. One thread per query head, iterating over all KV positions in a single pass — no intermediate N×N attention matrix materialized.
+- **GPU dispatch in MetalCompute**: `flash_attention_f32()` method that transfers flattened KV cache to GPU, dispatches the fused kernel, and returns attention output. Falls back to CPU for short sequences (< 4 positions).
+- **`flash_attention_gpu()` function**: Drop-in replacement for `flash_attention_cached()` that accepts an optional `MetalCompute` reference. GPU path handles Q/K/V projection + RoPE on CPU, then offloads attention computation to Metal. Transparent CPU fallback when Metal is unavailable.
+- **`LayerKvCache::flatten_kv()`**: Efficiently flattens the KV cache into contiguous `[seq_len × n_head_kv × head_dim]` arrays for GPU buffer upload.
+- **GQA (Grouped Query Attention) support**: GPU kernel correctly maps query heads to KV heads via `kv_group_size = n_head / n_head_kv`.
+- **5 new tests** (381 total): GPU basic, GPU-vs-CPU match, GPU with Metal, GPU GQA, KV cache flatten — all passing.
+
+### Technical Details
+- Metal shader uses 4-wide loop unrolling for QK dot products and fixed-size `float acc[256]` register array for head_dim ≤ 256 (covers all practical LLMs: 64, 80, 96, 128)
+- Online softmax maintains running max/sum accumulators — numerically stable without materializing full attention scores
+- Automatic dispatch threshold: GPU used when seq_len ≥ 4 (below that, CPU is faster than buffer transfer overhead)
+- Zero API changes to existing `flash_attention_cached()` — `flash_attention_gpu()` is an additive new function
+
+### Why This Matters
+Attention computation is the second most expensive operation in transformer inference (after weight matrix multiplies). The existing CPU flash attention iterates sequentially over KV positions per head. The Metal kernel parallelizes across all query heads simultaneously on GPU, with each thread's inner loop benefiting from GPU memory bandwidth for KV cache reads. For long contexts (>1K tokens), this provides significant speedup on Apple Silicon's unified memory architecture where GPU and CPU share the same physical memory — zero-copy buffer sharing eliminates transfer overhead.
+
+### Changed
+- `kernels.metal`: Added `flash_attention_f32` kernel (100 lines)
+- `gpu.rs`: Added `flash_attention_f32` pipeline + dispatch method
+- `compute.rs`: Added `flash_attention_f32()` method with GPU dispatch
+- `flash_attention.rs`: Added `flash_attention_gpu()` with Metal integration + CPU fallback
+- `kv_cache.rs`: Added `flatten_kv()` method
+- Cargo.toml version bumped to 1.28.0
+
 ## v1.27.0 — ARM NEON SIMD Intrinsics — Native Apple Silicon CPU Acceleration (2026-02-22)
 
 ### Added

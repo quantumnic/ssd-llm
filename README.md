@@ -383,6 +383,7 @@ This project builds on insights from:
 - [x] v1.16 — PagedAttention — vLLM-style paged KV cache management
 - [x] v1.17 — SSD Block Swapping — automatic KV cache page swapping to SSD
 - [x] v1.18 — Quantized Block Swapping — INT8 compression for 4x less SSD I/O
+- [x] v1.28 — Metal Flash Attention — fused GPU attention kernel (QK scoring + online softmax + V accumulation in single dispatch)
 - [x] v1.27 — ARM NEON SIMD — explicit NEON intrinsics for 2-4x CPU matvec/rmsnorm/softmax speedup
 
 ## Requirements

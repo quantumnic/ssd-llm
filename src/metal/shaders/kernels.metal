@@ -1341,3 +1341,101 @@ kernel void matvec_f16(
 
     y[tid] = sum;
 }
+
+// ============================================================
+// Flash Attention — Fused QK scoring + online softmax + V accumulation
+// One thread per query head. Iterates over all KV positions in a single
+// pass using the online softmax algorithm (Milakov & Gimelshein, 2018).
+//
+// Memory layout:
+//   q_heads:   [n_head × head_dim]  — pre-projected, RoPE'd query vectors
+//   k_cache:   [seq_len × n_head_kv × head_dim] — key cache (row-major)
+//   v_cache:   [seq_len × n_head_kv × head_dim] — value cache (row-major)
+//   output:    [n_head × head_dim]  — attention output per head
+//   params:    {n_head, n_head_kv, head_dim, seq_len, window_start, window_end}
+//
+// Supports GQA: multiple Q heads share one KV head (kv_group_size = n_head/n_head_kv).
+// head_dim must be ≤ 256 (covers all practical LLMs: 64, 80, 96, 128).
+// ============================================================
+kernel void flash_attention_f32(
+    device const float* q_heads  [[buffer(0)]],
+    device const float* k_cache  [[buffer(1)]],
+    device const float* v_cache  [[buffer(2)]],
+    device float* output         [[buffer(3)]],
+    constant uint* params        [[buffer(4)]],
+    uint tid                     [[thread_position_in_grid]]
+) {
+    const uint n_head      = params[0];
+    const uint n_head_kv   = params[1];
+    const uint head_dim    = params[2];
+    const uint seq_len     = params[3];
+    const uint window_start = params[4];
+    const uint window_end  = params[5];
+
+    if (tid >= n_head) return;
+
+    const uint h = tid;
+    const uint kv_group_size = max(n_head / n_head_kv, 1u);
+    const uint kv_h = h / kv_group_size;
+    const float scale = rsqrt(float(head_dim));
+
+    float running_max = -INFINITY;
+    float running_sum = 0.0;
+
+    // Per-head output accumulator (head_dim ≤ 256)
+    float acc[256];
+    for (uint d = 0; d < head_dim && d < 256; d++) {
+        acc[d] = 0.0;
+    }
+
+    const uint q_off = h * head_dim;
+    const uint eff_end = min(window_end, seq_len);
+    const uint hd4 = (head_dim / 4) * 4;
+
+    for (uint pos = window_start; pos < eff_end; pos++) {
+        // Q · K dot product with 4-wide unrolling
+        float dot = 0.0;
+        const uint k_off = pos * n_head_kv * head_dim + kv_h * head_dim;
+        for (uint d = 0; d < hd4; d += 4) {
+            dot += q_heads[q_off + d]     * k_cache[k_off + d]
+                 + q_heads[q_off + d + 1] * k_cache[k_off + d + 1]
+                 + q_heads[q_off + d + 2] * k_cache[k_off + d + 2]
+                 + q_heads[q_off + d + 3] * k_cache[k_off + d + 3];
+        }
+        for (uint d = hd4; d < head_dim; d++) {
+            dot += q_heads[q_off + d] * k_cache[k_off + d];
+        }
+        const float score = dot * scale;
+
+        // Online softmax update
+        const uint v_off = pos * n_head_kv * head_dim + kv_h * head_dim;
+        if (score > running_max) {
+            const float correction = exp(running_max - score);
+            running_sum *= correction;
+            for (uint d = 0; d < head_dim && d < 256; d++) {
+                acc[d] *= correction;
+            }
+            running_max = score;
+        }
+
+        const float weight = exp(score - running_max);
+        running_sum += weight;
+
+        for (uint d = 0; d < head_dim && d < 256; d++) {
+            acc[d] += weight * v_cache[v_off + d];
+        }
+    }
+
+    // Normalize and write output
+    const uint out_off = h * head_dim;
+    if (running_sum > 0.0) {
+        const float inv_sum = 1.0 / running_sum;
+        for (uint d = 0; d < head_dim && d < 256; d++) {
+            output[out_off + d] = acc[d] * inv_sum;
+        }
+    } else {
+        for (uint d = 0; d < head_dim && d < 256; d++) {
+            output[out_off + d] = 0.0;
+        }
+    }
+}

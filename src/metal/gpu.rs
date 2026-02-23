@@ -51,6 +51,7 @@ struct GpuPipelines {
     rope_f32: ComputePipelineState,
     silu_f32: ComputePipelineState,
     elementwise_mul: ComputePipelineState,
+    flash_attention_f32: ComputePipelineState,
 }
 
 unsafe impl Send for MetalGpu {}
@@ -126,6 +127,7 @@ impl MetalGpu {
             rope_f32: make_pipeline("rope_f32")?,
             silu_f32: make_pipeline("silu_f32")?,
             elementwise_mul: make_pipeline("elementwise_mul_f32")?,
+            flash_attention_f32: make_pipeline("flash_attention_f32")?,
         })
     }
 
@@ -503,6 +505,70 @@ impl MetalGpu {
         cmd.wait_until_completed();
 
         self.read_buffer::<f32>(&y_buf, out_dim)
+    }
+
+    /// GPU Flash Attention: fused QK scoring + online softmax + V accumulation
+    /// Returns attention output [n_head × head_dim] for all heads in a single dispatch.
+    ///
+    /// Arguments:
+    ///   q_heads:  [n_head, head_dim] — pre-projected, RoPE'd query vectors
+    ///   k_cache:  [seq_len, n_head_kv, head_dim] — flattened key cache
+    ///   v_cache:  [seq_len, n_head_kv, head_dim] — flattened value cache
+    ///   n_head, n_head_kv, head_dim, seq_len: dimensions
+    ///   window_start, window_end: attention window bounds
+    #[cfg(target_os = "macos")]
+    pub fn flash_attention_f32(
+        &self,
+        q_heads: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        n_head: usize,
+        n_head_kv: usize,
+        head_dim: usize,
+        seq_len: usize,
+        window_start: usize,
+        window_end: usize,
+    ) -> Vec<f32> {
+        let q_buf = self.create_buffer_with_data(q_heads);
+        let k_buf = self.create_buffer_with_data(k_cache);
+        let v_buf = self.create_buffer_with_data(v_cache);
+        let out_buf = self.create_buffer::<f32>(n_head * head_dim);
+        let params: [u32; 6] = [
+            n_head as u32,
+            n_head_kv as u32,
+            head_dim as u32,
+            seq_len as u32,
+            window_start as u32,
+            window_end as u32,
+        ];
+        let params_buf = self.create_buffer_with_data(&params);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&self.pipelines.flash_attention_f32);
+        encoder.set_buffer(0, Some(&q_buf), 0);
+        encoder.set_buffer(1, Some(&k_buf), 0);
+        encoder.set_buffer(2, Some(&v_buf), 0);
+        encoder.set_buffer(3, Some(&out_buf), 0);
+        encoder.set_buffer(4, Some(&params_buf), 0);
+
+        let thread_count = MTLSize::new(n_head as u64, 1, 1);
+        let threadgroup_size = MTLSize::new(
+            self.pipelines
+                .flash_attention_f32
+                .max_total_threads_per_threadgroup()
+                .min(n_head as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(thread_count, threadgroup_size);
+        encoder.end_encoding();
+
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        self.read_buffer::<f32>(&out_buf, n_head * head_dim)
     }
 
     // --- Buffer helpers ---

@@ -212,6 +212,51 @@ impl MetalCompute {
         softmax_f32_fast(x);
     }
 
+    /// GPU-accelerated flash attention: fused QK scoring + online softmax + V accumulation
+    /// Returns attention output [n_head × head_dim] computed entirely on GPU.
+    pub fn flash_attention_f32(
+        &self,
+        q_heads: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        n_head: usize,
+        n_head_kv: usize,
+        head_dim: usize,
+        seq_len: usize,
+        window_start: usize,
+        window_end: usize,
+    ) -> Option<Vec<f32>> {
+        #[cfg(target_os = "macos")]
+        if let Some(ref gpu) = self.gpu {
+            // Only dispatch to GPU if sequence length justifies the overhead
+            if seq_len >= 4 {
+                return Some(gpu.flash_attention_f32(
+                    q_heads,
+                    k_cache,
+                    v_cache,
+                    n_head,
+                    n_head_kv,
+                    head_dim,
+                    seq_len,
+                    window_start,
+                    window_end,
+                ));
+            }
+        }
+        let _ = (
+            q_heads,
+            k_cache,
+            v_cache,
+            n_head,
+            n_head_kv,
+            head_dim,
+            seq_len,
+            window_start,
+            window_end,
+        );
+        None
+    }
+
     /// Whether GPU dispatch is active
     pub fn has_gpu(&self) -> bool {
         self.gpu.is_some()

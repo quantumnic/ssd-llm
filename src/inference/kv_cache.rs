@@ -52,6 +52,19 @@ impl LayerKvCache {
         &self.values[pos][start..end]
     }
 
+    /// Flatten KV cache into contiguous arrays for GPU dispatch.
+    /// Returns (k_flat, v_flat) with layout [seq_len × n_kv_heads × head_dim].
+    pub fn flatten_kv(&self, _n_kv_heads: usize, _head_dim: usize) -> (Vec<f32>, Vec<f32>) {
+        let total = self.keys.len() * self.n_kv_heads * self.head_dim;
+        let mut k_flat = Vec::with_capacity(total);
+        let mut v_flat = Vec::with_capacity(total);
+        for pos in 0..self.keys.len() {
+            k_flat.extend_from_slice(&self.keys[pos]);
+            v_flat.extend_from_slice(&self.values[pos]);
+        }
+        (k_flat, v_flat)
+    }
+
     /// Memory usage in bytes
     pub fn size_bytes(&self) -> usize {
         let per_entry = self.n_kv_heads * self.head_dim * std::mem::size_of::<f32>();
