@@ -1441,6 +1441,32 @@ kernel void flash_attention_f32(
 }
 
 // ============================================================
+// Fused Residual Add + RMSNorm
+// Phase 1: x[i] += residual[i], then compute partial sum of squares
+// Phase 2: normalize x[i] = x[i] * inv_rms * weight[i]
+// Saves one full memory pass over the hidden state compared to
+// separate residual add + rmsnorm.
+// ============================================================
+kernel void fused_residual_rmsnorm_sumsq(
+    device float* x              [[buffer(0)]],  // in-place: hidden state (modified)
+    device const float* residual [[buffer(1)]],  // residual to add
+    device float* partial_sums   [[buffer(2)]],  // partial sum-of-squares output
+    constant uint& n             [[buffer(3)]],  // vector dimension
+    uint tid                     [[thread_position_in_grid]],
+    uint tcount                  [[threads_per_grid]]
+) {
+    float sum = 0.0;
+    for (uint i = tid; i < n; i += tcount) {
+        float val = x[i] + residual[i];
+        x[i] = val;
+        sum += val * val;
+    }
+    partial_sums[tid] = sum;
+}
+
+// Phase 2 reuses the existing rmsnorm_normalize kernel (same signature).
+
+// ============================================================
 // Fused SwiGLU: out[row] = silu(dot(w_gate[row], x)) * dot(w_up[row], x)
 // Each thread computes one output element of the intermediate vector.
 // Fuses gate_proj matvec + silu + up_proj matvec + element-wise multiply

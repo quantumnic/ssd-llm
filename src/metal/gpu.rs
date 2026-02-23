@@ -53,6 +53,7 @@ struct GpuPipelines {
     elementwise_mul: ComputePipelineState,
     flash_attention_f32: ComputePipelineState,
     fused_swiglu_f32: ComputePipelineState,
+    fused_residual_rmsnorm_sumsq: ComputePipelineState,
 }
 
 unsafe impl Send for MetalGpu {}
@@ -130,6 +131,7 @@ impl MetalGpu {
             elementwise_mul: make_pipeline("elementwise_mul_f32")?,
             flash_attention_f32: make_pipeline("flash_attention_f32")?,
             fused_swiglu_f32: make_pipeline("fused_swiglu_f32")?,
+            fused_residual_rmsnorm_sumsq: make_pipeline("fused_residual_rmsnorm_sumsq")?,
         })
     }
 
@@ -649,6 +651,76 @@ impl MetalGpu {
         // Phase 2: down_proj matvec — reuse existing GPU matvec
         let intermediate = self.read_buffer::<f32>(&intermediate_buf, n_ff);
         self.matvec_f32(w_down, &intermediate, n_embd, n_ff)
+    }
+
+    /// Fused residual add + RMS normalization in-place on GPU.
+    /// Computes: x[i] += residual[i], then x[i] = (x[i] / rms) * weight[i]
+    /// Saves one full memory pass compared to separate residual add + rmsnorm.
+    #[cfg(target_os = "macos")]
+    pub fn fused_residual_rmsnorm_f32(
+        &self,
+        x: &mut [f32],
+        residual: &[f32],
+        weight: &[f32],
+        eps: f32,
+    ) {
+        let n = x.len();
+        debug_assert_eq!(n, residual.len());
+        debug_assert_eq!(n, weight.len());
+
+        // Phase 1: fused residual add + sum of squares
+        let x_buf = self.create_buffer_with_data(x);
+        let res_buf = self.create_buffer_with_data(residual);
+        let n_threads = 256usize;
+        let partial_buf = self.create_buffer::<f32>(n_threads);
+        let n_buf = self.create_buffer_with_data(&[n as u32]);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.fused_residual_rmsnorm_sumsq);
+        encoder.set_buffer(0, Some(&x_buf), 0);
+        encoder.set_buffer(1, Some(&res_buf), 0);
+        encoder.set_buffer(2, Some(&partial_buf), 0);
+        encoder.set_buffer(3, Some(&n_buf), 0);
+        let tg = MTLSize::new(n_threads as u64, 1, 1);
+        encoder.dispatch_threads(tg, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        // CPU reduction of partial sums
+        let partials = self.read_buffer::<f32>(&partial_buf, n_threads);
+        let sum_sq: f32 = partials.iter().sum();
+        let inv_rms = 1.0 / (sum_sq / n as f32 + eps).sqrt();
+
+        // Phase 2: normalize (reuse existing rmsnorm_normalize pipeline)
+        let weight_buf = self.create_buffer_with_data(weight);
+        let inv_rms_buf = self.create_buffer_with_data(&[inv_rms]);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.rmsnorm_normalize);
+        encoder.set_buffer(0, Some(&x_buf), 0);
+        encoder.set_buffer(1, Some(&weight_buf), 0);
+        encoder.set_buffer(2, Some(&inv_rms_buf), 0);
+        encoder.set_buffer(3, Some(&n_buf), 0);
+        let threads = MTLSize::new(n as u64, 1, 1);
+        let tg = MTLSize::new(
+            (self
+                .pipelines
+                .rmsnorm_normalize
+                .max_total_threads_per_threadgroup())
+            .min(n as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(threads, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let result = self.read_buffer::<f32>(&x_buf, n);
+        x.copy_from_slice(&result);
     }
 
     #[cfg(target_os = "macos")]

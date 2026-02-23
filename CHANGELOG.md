@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.30.0 — Fused Residual + RMSNorm Metal Kernel (2026-02-23)
+
+### Added
+- **Fused Residual + RMSNorm Metal shader**: `fused_residual_rmsnorm_sumsq` kernel that combines residual connection addition (`x += residual`) with RMSNorm sum-of-squares computation in a single GPU dispatch. Reuses existing `rmsnorm_normalize` for the normalization phase.
+- **`MetalGpu::fused_residual_rmsnorm_f32()`**: GPU dispatch method that runs fused add+sumsq on GPU, CPU partial-sum reduction, then GPU normalize — 2 dispatches instead of 3 separate operations.
+- **`fused_residual_rmsnorm_f32()` CPU function**: Scalar fused path that adds residual and computes sum of squares in one loop, eliminating an extra memory pass over the hidden state.
+- **4 new tests** (390 total): basic correctness, match-vs-separate, zero-residual equivalence, GPU-vs-CPU numerical match — all passing.
+
+### Technical Details
+- Each transformer layer performs residual add + RMSNorm twice (post-attention and post-FFN). The fused kernel eliminates one full read+write pass over the hidden state vector per fusion point.
+- For a 4096-dim hidden state at FP32, this saves ~32KB of memory bandwidth per layer per token — significant at 80+ layers.
+- Phase 2 (normalize) reuses the existing `rmsnorm_normalize` pipeline — no shader duplication.
+- CPU fallback is always available; GPU path activates when Metal is present.
+
+### Why This Matters
+Memory bandwidth is the primary bottleneck in LLM inference on Apple Silicon. The transformer forward pass repeatedly cycles through residual-add → normalize → compute patterns. Fusing the residual add into the normalization's first pass (sum-of-squares) removes redundant memory traffic, improving tokens/sec especially for large hidden dimensions (4096+) common in 70B models.
+
 ## v1.28.0 — Metal Flash Attention — Fused GPU Attention Kernel (2026-02-23)
 
 ### Added

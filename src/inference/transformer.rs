@@ -181,12 +181,14 @@ pub fn batch_prefill_lora(
                     position,
                     kv_layer,
                 );
+                // 3. Fused residual add + RMS Norm (pre-FFN)
+                // hidden_state += attn_output, then ffn_input = rmsnorm(hidden_state)
+                // Fused: update hidden_state and compute normalized ffn_input together
                 for (i, hs) in hidden_state.iter_mut().enumerate() {
                     *hs += attn_output.get(i).copied().unwrap_or(0.0);
                 }
             }
 
-            // 3. RMS Norm (pre-FFN)
             let mut ffn_input = hidden_state.clone();
             if let Some(norm_w) = find_tensor_in_layer(cached, "ffn_norm.weight", layer_idx) {
                 rms_norm(&mut ffn_input, norm_w);

@@ -332,6 +332,29 @@ pub fn rmsnorm_f32_fast(x: &mut [f32], weight: &[f32], eps: f32) {
     }
 }
 
+/// Fused residual add + RMS normalization.
+/// Computes x[i] += residual[i], then RMSNorm(x, weight) in-place.
+/// Saves one memory pass vs separate add + rmsnorm.
+/// On GPU: single dispatch for add+sumsq, then normalize.
+/// On CPU: fused scalar loop.
+pub fn fused_residual_rmsnorm_f32(x: &mut [f32], residual: &[f32], weight: &[f32], eps: f32) {
+    debug_assert_eq!(x.len(), residual.len());
+    debug_assert_eq!(x.len(), weight.len());
+
+    // Fused scalar path: add residual and compute sum_sq in one pass
+    let n = x.len();
+    let mut sum_sq = 0.0f32;
+    for (i, xi) in x.iter_mut().enumerate() {
+        let val = *xi + residual.get(i).copied().unwrap_or(0.0);
+        *xi = val;
+        sum_sq += val * val;
+    }
+    let inv_rms = 1.0 / (sum_sq / n as f32 + eps).sqrt();
+    for (i, val) in x.iter_mut().enumerate() {
+        *val *= inv_rms * weight.get(i).copied().unwrap_or(1.0);
+    }
+}
+
 /// Scalar RMS normalization fallback
 pub fn rmsnorm_f32_fast_scalar(x: &mut [f32], weight: &[f32], eps: f32) {
     let n = x.len();
@@ -2803,6 +2826,91 @@ mod tests {
                 metal.shader_library_path().is_some(),
                 "Metal shaders should compile on macOS"
             );
+        }
+    }
+
+    #[test]
+    fn test_fused_residual_rmsnorm_basic() {
+        // x = [1, 2, 3], residual = [1, 1, 1] → x_new = [2, 3, 4]
+        // rms = sqrt((4+9+16)/3) = sqrt(29/3) ≈ 3.109
+        // weight = [1, 1, 1] → output = x_new / rms
+        let mut x = vec![1.0f32, 2.0, 3.0];
+        let residual = vec![1.0f32, 1.0, 1.0];
+        let weight = vec![1.0f32, 1.0, 1.0];
+        fused_residual_rmsnorm_f32(&mut x, &residual, &weight, 1e-5);
+
+        let expected_rms = ((4.0 + 9.0 + 16.0) / 3.0f32 + 1e-5).sqrt();
+        let inv = 1.0 / expected_rms;
+        assert!((x[0] - 2.0 * inv).abs() < 1e-5);
+        assert!((x[1] - 3.0 * inv).abs() < 1e-5);
+        assert!((x[2] - 4.0 * inv).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fused_residual_rmsnorm_matches_separate() {
+        // Verify fused gives same result as separate add + rmsnorm
+        let x_orig = vec![0.5f32, -1.2, 3.7, 0.1, -2.5, 1.8, 0.3, -0.9];
+        let residual = vec![0.1f32, 0.3, -0.5, 1.0, 0.2, -0.4, 0.8, 0.6];
+        let weight = vec![1.0f32, 0.5, 2.0, 1.5, 0.8, 1.2, 0.3, 1.7];
+        let eps = 1e-5;
+
+        // Separate path
+        let mut x_sep = x_orig.clone();
+        for (i, v) in x_sep.iter_mut().enumerate() {
+            *v += residual[i];
+        }
+        rmsnorm_f32_fast_scalar(&mut x_sep, &weight, eps);
+
+        // Fused path
+        let mut x_fused = x_orig;
+        fused_residual_rmsnorm_f32(&mut x_fused, &residual, &weight, eps);
+
+        for (a, b) in x_sep.iter().zip(x_fused.iter()) {
+            assert!((a - b).abs() < 1e-5, "mismatch: separate={a}, fused={b}");
+        }
+    }
+
+    #[test]
+    fn test_fused_residual_rmsnorm_zero_residual() {
+        // With zero residual, should match plain rmsnorm
+        let mut x_plain = vec![1.0f32, 2.0, 3.0, 4.0];
+        let mut x_fused = x_plain.clone();
+        let weight = vec![1.0f32; 4];
+        let residual = vec![0.0f32; 4];
+        let eps = 1e-5;
+
+        rmsnorm_f32_fast_scalar(&mut x_plain, &weight, eps);
+        fused_residual_rmsnorm_f32(&mut x_fused, &residual, &weight, eps);
+
+        for (a, b) in x_plain.iter().zip(x_fused.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_fused_residual_rmsnorm_gpu_matches_cpu() {
+        // If Metal GPU is available, verify GPU path matches CPU
+        let gpu = MetalGpu::new();
+        if gpu.is_none() {
+            return; // skip on non-macOS
+        }
+        let gpu = gpu.unwrap();
+
+        let x_orig = vec![0.5f32, -1.2, 3.7, 0.1, -2.5, 1.8, 0.3, -0.9];
+        let residual = vec![0.1f32, 0.3, -0.5, 1.0, 0.2, -0.4, 0.8, 0.6];
+        let weight = vec![1.0f32, 0.5, 2.0, 1.5, 0.8, 1.2, 0.3, 1.7];
+        let eps = 1e-5;
+
+        // CPU path
+        let mut x_cpu = x_orig.clone();
+        fused_residual_rmsnorm_f32(&mut x_cpu, &residual, &weight, eps);
+
+        // GPU path
+        let mut x_gpu = x_orig;
+        gpu.fused_residual_rmsnorm_f32(&mut x_gpu, &residual, &weight, eps);
+
+        for (i, (a, b)) in x_cpu.iter().zip(x_gpu.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-4, "index {i}: cpu={a}, gpu={b}");
         }
     }
 }
