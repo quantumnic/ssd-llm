@@ -469,14 +469,10 @@ fn read_metadata_value_typed<R: Read>(reader: &mut R, value_type: u32) -> Result
             // Array
             let elem_type = reader.read_u32::<LittleEndian>()?;
             let count = reader.read_u64::<LittleEndian>()? as usize;
-            // For large arrays (like token lists), limit what we store
-            let store_limit = 1000;
-            let mut values = Vec::with_capacity(count.min(store_limit));
-            for i in 0..count {
+            let mut values = Vec::with_capacity(count);
+            for _i in 0..count {
                 let val = read_metadata_value_typed(reader, elem_type)?;
-                if i < store_limit {
-                    values.push(val);
-                }
+                values.push(val);
             }
             Ok(MetadataValue::Array(values))
         }

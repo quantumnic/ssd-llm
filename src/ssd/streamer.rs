@@ -115,6 +115,7 @@ fn dequantize_to_f32(data: &[u8], dtype: &GgmlType, n_elements: usize) -> Result
         }
         GgmlType::Q8_0 => dequantize_q8_0(data, n_elements),
         GgmlType::Q4_0 => dequantize_q4_0(data, n_elements),
+        GgmlType::Q6K => dequantize_q6_k(data, n_elements),
         _ => {
             // For unsupported quantization types, return zeros with a warning
             tracing::warn!("Unsupported quantization type {:?}, returning zeros", dtype);
@@ -169,6 +170,44 @@ fn dequantize_q4_0(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
             let hi = ((byte >> 4) & 0x0F) as i8 - 8;
             output.push(lo as f32 * scale);
             output.push(hi as f32 * scale);
+        }
+    }
+
+    output.resize(n_elements, 0.0);
+    Ok(output)
+}
+
+/// Dequantize Q6_K: block_size=256
+/// Layout per block: ql[128] + qh[64] + scales[16] + f16 d
+fn dequantize_q6_k(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
+    let block_size: usize = 256;
+    let block_bytes: usize = 210; // 128 + 64 + 16 + 2
+    let n_blocks = n_elements / block_size;
+    let mut output = Vec::with_capacity(n_elements);
+
+    for i in 0..n_blocks {
+        let bs = i * block_bytes;
+        if bs + block_bytes > data.len() {
+            break;
+        }
+        let ql = &data[bs..bs + 128];
+        let qh = &data[bs + 128..bs + 192];
+        let scales = &data[bs + 192..bs + 208];
+        let d = half::f16::from_bits(u16::from_le_bytes([data[bs + 208], data[bs + 209]])).to_f32();
+
+        for j in 0..256usize {
+            let ql_idx = j / 2;
+            let ql_byte = ql[ql_idx];
+            let ql_val = if j % 2 == 0 { ql_byte & 0x0F } else { ql_byte >> 4 };
+
+            let qh_idx = j / 4;
+            let qh_shift = (j % 4) * 2;
+            let qh_val = (qh[qh_idx] >> qh_shift) & 0x03;
+
+            let q = (ql_val | (qh_val << 4)) as i8 - 32;
+            let scale = scales[j / 16] as i8;
+
+            output.push(d * scale as f32 * q as f32);
         }
     }
 
