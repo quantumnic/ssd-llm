@@ -198,7 +198,11 @@ fn dequantize_q6_k(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
         for j in 0..256usize {
             let ql_idx = j / 2;
             let ql_byte = ql[ql_idx];
-            let ql_val = if j % 2 == 0 { ql_byte & 0x0F } else { ql_byte >> 4 };
+            let ql_val = if j % 2 == 0 {
+                ql_byte & 0x0F
+            } else {
+                ql_byte >> 4
+            };
 
             let qh_idx = j / 4;
             let qh_shift = (j % 4) * 2;

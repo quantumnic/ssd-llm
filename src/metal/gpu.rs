@@ -54,6 +54,7 @@ struct GpuPipelines {
     flash_attention_f32: ComputePipelineState,
     fused_swiglu_f32: ComputePipelineState,
     fused_residual_rmsnorm_sumsq: ComputePipelineState,
+    fused_qkv_f32: ComputePipelineState,
 }
 
 unsafe impl Send for MetalGpu {}
@@ -132,6 +133,7 @@ impl MetalGpu {
             flash_attention_f32: make_pipeline("flash_attention_f32")?,
             fused_swiglu_f32: make_pipeline("fused_swiglu_f32")?,
             fused_residual_rmsnorm_sumsq: make_pipeline("fused_residual_rmsnorm_sumsq")?,
+            fused_qkv_f32: make_pipeline("fused_qkv_f32")?,
         })
     }
 
@@ -721,6 +723,89 @@ impl MetalGpu {
 
         let result = self.read_buffer::<f32>(&x_buf, n);
         x.copy_from_slice(&result);
+    }
+
+    /// Fused QKV projection: compute Q, K, V in a single GPU dispatch
+    ///
+    /// Instead of 3 separate matvec dispatches (Q=Wq·x, K=Wk·x, V=Wv·x),
+    /// this dispatches all three as a single kernel where each thread computes
+    /// one output element across the combined Q+K+V output space.
+    /// Reduces command buffer overhead from 3 dispatches to 1.
+    #[cfg(target_os = "macos")]
+    pub fn fused_qkv_f32(
+        &self,
+        wq: &[f32],
+        wk: &[f32],
+        wv: &[f32],
+        x: &[f32],
+        q_dim: usize,
+        kv_dim: usize,
+        n_embd: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let total_out = q_dim + kv_dim + kv_dim;
+
+        // Don't use GPU for small projections
+        if total_out * n_embd < MIN_GPU_ELEMENTS {
+            let q = crate::metal::compute::matvec_f32_simd(wq, x, q_dim, n_embd);
+            let k = crate::metal::compute::matvec_f32_simd(wk, x, kv_dim, n_embd);
+            let v = crate::metal::compute::matvec_f32_simd(wv, x, kv_dim, n_embd);
+            return (q, k, v);
+        }
+
+        let opts = MTLResourceOptions::StorageModeShared;
+
+        let wq_buf =
+            self.device
+                .new_buffer_with_data(wq.as_ptr() as *const _, (wq.len() * 4) as u64, opts);
+        let wk_buf =
+            self.device
+                .new_buffer_with_data(wk.as_ptr() as *const _, (wk.len() * 4) as u64, opts);
+        let wv_buf =
+            self.device
+                .new_buffer_with_data(wv.as_ptr() as *const _, (wv.len() * 4) as u64, opts);
+        let x_buf =
+            self.device
+                .new_buffer_with_data(x.as_ptr() as *const _, (x.len() * 4) as u64, opts);
+        let q_buf = self.device.new_buffer((q_dim * 4) as u64, opts);
+        let k_buf = self.device.new_buffer((kv_dim * 4) as u64, opts);
+        let v_buf = self.device.new_buffer((kv_dim * 4) as u64, opts);
+
+        let q_dim_u32 = q_dim as u32;
+        let kv_dim_u32 = kv_dim as u32;
+        let n_embd_u32 = n_embd as u32;
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.fused_qkv_f32);
+        encoder.set_buffer(0, Some(&wq_buf), 0);
+        encoder.set_buffer(1, Some(&wk_buf), 0);
+        encoder.set_buffer(2, Some(&wv_buf), 0);
+        encoder.set_buffer(3, Some(&x_buf), 0);
+        encoder.set_buffer(4, Some(&q_buf), 0);
+        encoder.set_buffer(5, Some(&k_buf), 0);
+        encoder.set_buffer(6, Some(&v_buf), 0);
+        encoder.set_bytes(7, 4, &q_dim_u32 as *const u32 as *const _);
+        encoder.set_bytes(8, 4, &kv_dim_u32 as *const u32 as *const _);
+        encoder.set_bytes(9, 4, &n_embd_u32 as *const u32 as *const _);
+
+        let threads = MTLSize::new(total_out as u64, 1, 1);
+        let tg = MTLSize::new(
+            self.pipelines
+                .fused_qkv_f32
+                .max_total_threads_per_threadgroup()
+                .min(total_out as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(threads, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let q = self.read_buffer::<f32>(&q_buf, q_dim);
+        let k = self.read_buffer::<f32>(&k_buf, kv_dim);
+        let v = self.read_buffer::<f32>(&v_buf, kv_dim);
+        (q, k, v)
     }
 
     #[cfg(target_os = "macos")]

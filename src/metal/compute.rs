@@ -266,6 +266,29 @@ impl MetalCompute {
     pub fn shader_library_path(&self) -> Option<&str> {
         self.shader_lib.as_deref()
     }
+
+    /// Fused QKV projection: compute Q, K, V in a single GPU dispatch.
+    /// Falls back to 3 separate CPU matvecs when GPU is unavailable or tensors are small.
+    /// Returns (Q, K, V) vectors.
+    pub fn fused_qkv_f32(
+        &self,
+        wq: &[f32],
+        wk: &[f32],
+        wv: &[f32],
+        x: &[f32],
+        q_dim: usize,
+        kv_dim: usize,
+        n_embd: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(gpu) = &self.gpu {
+                return gpu.fused_qkv_f32(wq, wk, wv, x, q_dim, kv_dim, n_embd);
+            }
+        }
+        // CPU fallback
+        fused_qkv_f32_cpu(wq, wk, wv, x, q_dim, kv_dim, n_embd)
+    }
 }
 
 /// SIMD-friendly matrix-vector multiply.
@@ -353,6 +376,24 @@ pub fn fused_residual_rmsnorm_f32(x: &mut [f32], residual: &[f32], weight: &[f32
     for (i, val) in x.iter_mut().enumerate() {
         *val *= inv_rms * weight.get(i).copied().unwrap_or(1.0);
     }
+}
+
+/// Fused QKV projection on CPU: compute Q, K, V from a single input vector.
+/// Equivalent to 3 separate matvec calls but expressed as a single function
+/// for symmetry with the GPU kernel.
+pub fn fused_qkv_f32_cpu(
+    wq: &[f32],
+    wk: &[f32],
+    wv: &[f32],
+    x: &[f32],
+    q_dim: usize,
+    kv_dim: usize,
+    n_embd: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let q = matvec_f32_simd(wq, x, q_dim, n_embd);
+    let k = matvec_f32_simd(wk, x, kv_dim, n_embd);
+    let v = matvec_f32_simd(wv, x, kv_dim, n_embd);
+    (q, k, v)
 }
 
 /// Scalar RMS normalization fallback
@@ -2884,6 +2925,132 @@ mod tests {
 
         for (a, b) in x_plain.iter().zip(x_fused.iter()) {
             assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_fused_qkv_cpu_basic() {
+        // 2x3 identity-ish weights, 3-dim input
+        let n_embd = 3;
+        let q_dim = 2;
+        let kv_dim = 2;
+        let wq = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]; // picks x[0], x[1]
+        let wk = vec![0.0, 1.0, 0.0, 0.0, 0.0, 1.0]; // picks x[1], x[2]
+        let wv = vec![1.0, 1.0, 0.0, 0.0, 1.0, 1.0]; // x[0]+x[1], x[1]+x[2]
+        let x = vec![2.0, 3.0, 5.0];
+
+        let (q, k, v) = fused_qkv_f32_cpu(&wq, &wk, &wv, &x, q_dim, kv_dim, n_embd);
+        assert!((q[0] - 2.0).abs() < 1e-6);
+        assert!((q[1] - 3.0).abs() < 1e-6);
+        assert!((k[0] - 3.0).abs() < 1e-6);
+        assert!((k[1] - 5.0).abs() < 1e-6);
+        assert!((v[0] - 5.0).abs() < 1e-6);
+        assert!((v[1] - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_fused_qkv_matches_separate() {
+        // Verify fused CPU path matches 3 separate matvecs
+        let n_embd = 16;
+        let q_dim = 8;
+        let kv_dim = 4;
+        let wq: Vec<f32> = (0..q_dim * n_embd)
+            .map(|i| (i % 11) as f32 * 0.1 - 0.5)
+            .collect();
+        let wk: Vec<f32> = (0..kv_dim * n_embd)
+            .map(|i| (i % 7) as f32 * 0.15 - 0.3)
+            .collect();
+        let wv: Vec<f32> = (0..kv_dim * n_embd)
+            .map(|i| (i % 13) as f32 * 0.08 - 0.4)
+            .collect();
+        let x: Vec<f32> = (0..n_embd).map(|i| (i % 5) as f32 * 0.3 - 0.6).collect();
+
+        let q_sep = matvec_f32_simd(&wq, &x, q_dim, n_embd);
+        let k_sep = matvec_f32_simd(&wk, &x, kv_dim, n_embd);
+        let v_sep = matvec_f32_simd(&wv, &x, kv_dim, n_embd);
+
+        let (q_fused, k_fused, v_fused) =
+            fused_qkv_f32_cpu(&wq, &wk, &wv, &x, q_dim, kv_dim, n_embd);
+
+        for i in 0..q_dim {
+            assert!((q_sep[i] - q_fused[i]).abs() < 1e-4, "Q mismatch at {i}");
+        }
+        for i in 0..kv_dim {
+            assert!((k_sep[i] - k_fused[i]).abs() < 1e-4, "K mismatch at {i}");
+            assert!((v_sep[i] - v_fused[i]).abs() < 1e-4, "V mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_fused_qkv_gpu_matches_cpu() {
+        let gpu = MetalGpu::new();
+        if gpu.is_none() {
+            return; // skip on non-macOS
+        }
+        let gpu = gpu.unwrap();
+
+        let n_embd = 32;
+        let q_dim = 16;
+        let kv_dim = 8;
+        let wq: Vec<f32> = (0..q_dim * n_embd)
+            .map(|i| (i % 11) as f32 * 0.1 - 0.5)
+            .collect();
+        let wk: Vec<f32> = (0..kv_dim * n_embd)
+            .map(|i| (i % 7) as f32 * 0.15 - 0.3)
+            .collect();
+        let wv: Vec<f32> = (0..kv_dim * n_embd)
+            .map(|i| (i % 13) as f32 * 0.08 - 0.4)
+            .collect();
+        let x: Vec<f32> = (0..n_embd).map(|i| (i % 5) as f32 * 0.3 - 0.6).collect();
+
+        let (q_cpu, k_cpu, v_cpu) = fused_qkv_f32_cpu(&wq, &wk, &wv, &x, q_dim, kv_dim, n_embd);
+        let (q_gpu, k_gpu, v_gpu) = gpu.fused_qkv_f32(&wq, &wk, &wv, &x, q_dim, kv_dim, n_embd);
+
+        for i in 0..q_dim {
+            assert!(
+                (q_cpu[i] - q_gpu[i]).abs() < 1e-4,
+                "Q gpu mismatch at {i}: cpu={}, gpu={}",
+                q_cpu[i],
+                q_gpu[i]
+            );
+        }
+        for i in 0..kv_dim {
+            assert!((k_cpu[i] - k_gpu[i]).abs() < 1e-4, "K gpu mismatch at {i}");
+            assert!((v_cpu[i] - v_gpu[i]).abs() < 1e-4, "V gpu mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_fused_qkv_metal_compute_dispatch() {
+        // Test via MetalCompute wrapper (integration)
+        let mc = MetalCompute::new();
+        if mc.is_none() {
+            return;
+        }
+        let mc = mc.unwrap();
+
+        let n_embd = 16;
+        let q_dim = 8;
+        let kv_dim = 4;
+        let wq: Vec<f32> = (0..q_dim * n_embd).map(|i| (i % 9) as f32 * 0.12).collect();
+        let wk: Vec<f32> = (0..kv_dim * n_embd).map(|i| (i % 5) as f32 * 0.2).collect();
+        let wv: Vec<f32> = (0..kv_dim * n_embd)
+            .map(|i| (i % 7) as f32 * 0.15)
+            .collect();
+        let x: Vec<f32> = (0..n_embd).map(|i| i as f32 * 0.1).collect();
+
+        let (q, k, v) = mc.fused_qkv_f32(&wq, &wk, &wv, &x, q_dim, kv_dim, n_embd);
+        assert_eq!(q.len(), q_dim);
+        assert_eq!(k.len(), kv_dim);
+        assert_eq!(v.len(), kv_dim);
+
+        // Cross-check with separate matvecs
+        let q_ref = matvec_f32_simd(&wq, &x, q_dim, n_embd);
+        for i in 0..q_dim {
+            assert!(
+                (q[i] - q_ref[i]).abs() < 1e-4,
+                "MetalCompute QKV Q mismatch at {i}"
+            );
         }
     }
 

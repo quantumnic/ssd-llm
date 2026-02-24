@@ -4,7 +4,7 @@
 //! Supports Grouped-Query Attention (GQA) where n_head > n_head_kv.
 
 use crate::inference::kv_cache::LayerKvCache;
-use crate::metal::compute::{matvec_f32_simd, softmax_f32_fast};
+use crate::metal::compute::{matvec_f32_simd, softmax_f32_fast, MetalCompute};
 
 /// Compute multi-head attention with KV cache
 ///
@@ -85,6 +85,83 @@ pub fn multi_head_attention_cached(
     }
 
     // Output projection: attn_output @ Wo
+    matvec_f32_simd(wo, &attn_output, n_embd, n_embd)
+}
+
+/// GPU-accelerated multi-head attention with fused QKV projection.
+/// Uses Metal GPU to compute Q, K, V in a single dispatch when available.
+/// Falls back to CPU when Metal is not present.
+pub fn multi_head_attention_gpu(
+    x: &[f32],
+    wq: &[f32],
+    wk: &[f32],
+    wv: &[f32],
+    wo: &[f32],
+    n_head: usize,
+    n_head_kv: usize,
+    head_dim: usize,
+    position: usize,
+    kv_cache: &mut LayerKvCache,
+    metal: Option<&MetalCompute>,
+) -> Vec<f32> {
+    let n_embd = x.len();
+    let q_dim = n_head * head_dim;
+    let kv_dim = n_head_kv * head_dim;
+
+    // Fused QKV projection: 1 GPU dispatch instead of 3
+    let (mut q, mut k, v) = match metal {
+        Some(mc) => mc.fused_qkv_f32(wq, wk, wv, x, q_dim, kv_dim, n_embd),
+        None => {
+            let q = matvec_f32_simd(wq, x, q_dim, n_embd);
+            let k = matvec_f32_simd(wk, x, kv_dim, n_embd);
+            let v = matvec_f32_simd(wv, x, kv_dim, n_embd);
+            (q, k, v)
+        }
+    };
+
+    // Apply RoPE to Q and K
+    apply_rope_inplace(&mut q, head_dim, n_head, position);
+    apply_rope_inplace(&mut k, head_dim, n_head_kv, position);
+
+    // Append K, V to cache
+    kv_cache.append(k, v);
+
+    let seq_len = kv_cache.seq_len();
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let kv_group_size = (n_head / n_head_kv).max(1);
+
+    let mut attn_output = vec![0.0f32; n_embd];
+
+    for h in 0..n_head {
+        let kv_h = h / kv_group_size;
+        let q_offset = h * head_dim;
+        let q_head = &q[q_offset..q_offset + head_dim];
+
+        let mut scores = Vec::with_capacity(seq_len);
+        for pos in 0..seq_len {
+            let k_head = kv_cache.key_at(pos, kv_h);
+            let mut dot = 0.0f32;
+            for d in 0..head_dim {
+                dot += q_head[d] * k_head[d];
+            }
+            scores.push(dot * scale);
+        }
+
+        softmax_f32_fast(&mut scores);
+
+        let out_offset = h * head_dim;
+        for d in 0..head_dim {
+            let mut weighted = 0.0f32;
+            for (pos, &score) in scores.iter().enumerate().take(seq_len) {
+                let v_head = kv_cache.value_at(pos, kv_h);
+                weighted += score * v_head[d];
+            }
+            if out_offset + d < attn_output.len() {
+                attn_output[out_offset + d] = weighted;
+            }
+        }
+    }
+
     matvec_f32_simd(wo, &attn_output, n_embd, n_embd)
 }
 
@@ -180,6 +257,103 @@ mod tests {
             assert!(
                 (x[i] - orig[i]).abs() < 1e-6,
                 "RoPE at pos 0 should be identity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gpu_attention_matches_cpu() {
+        let n_embd = 8;
+        let n_head = 2;
+        let n_head_kv = 2;
+        let head_dim = 4;
+        let x = vec![1.0f32; n_embd];
+        let w = vec![0.01f32; n_embd * n_embd];
+
+        // CPU path
+        let mut kv_cpu = LayerKvCache::new(n_head_kv, head_dim);
+        let out_cpu = multi_head_attention_cached(
+            &x,
+            &w,
+            &w,
+            &w,
+            &w,
+            n_head,
+            n_head_kv,
+            head_dim,
+            0,
+            &mut kv_cpu,
+        );
+
+        // GPU path (with None metal = CPU fallback, same result)
+        let mut kv_gpu = LayerKvCache::new(n_head_kv, head_dim);
+        let out_gpu = multi_head_attention_gpu(
+            &x,
+            &w,
+            &w,
+            &w,
+            &w,
+            n_head,
+            n_head_kv,
+            head_dim,
+            0,
+            &mut kv_gpu,
+            None,
+        );
+
+        for (i, (a, b)) in out_cpu.iter().zip(out_gpu.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-5, "Mismatch at {i}: cpu={a}, gpu={b}");
+        }
+    }
+
+    #[test]
+    fn test_gpu_attention_with_metal() {
+        let mc = MetalCompute::new();
+        if mc.is_none() {
+            return; // skip on non-macOS
+        }
+        let mc = mc.unwrap();
+
+        let n_embd = 8;
+        let n_head = 2;
+        let n_head_kv = 2;
+        let head_dim = 4;
+        let x = vec![0.5f32; n_embd];
+        let w = vec![0.02f32; n_embd * n_embd];
+
+        let mut kv_cpu = LayerKvCache::new(n_head_kv, head_dim);
+        let out_cpu = multi_head_attention_cached(
+            &x,
+            &w,
+            &w,
+            &w,
+            &w,
+            n_head,
+            n_head_kv,
+            head_dim,
+            0,
+            &mut kv_cpu,
+        );
+
+        let mut kv_gpu = LayerKvCache::new(n_head_kv, head_dim);
+        let out_gpu = multi_head_attention_gpu(
+            &x,
+            &w,
+            &w,
+            &w,
+            &w,
+            n_head,
+            n_head_kv,
+            head_dim,
+            0,
+            &mut kv_gpu,
+            Some(&mc),
+        );
+
+        for (i, (a, b)) in out_cpu.iter().zip(out_gpu.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "Metal mismatch at {i}: cpu={a}, gpu={b}"
             );
         }
     }

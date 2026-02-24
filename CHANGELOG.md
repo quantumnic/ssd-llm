@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.31.0 — Fused QKV Projection Metal Kernel (2026-02-24)
+
+### Added
+- **Fused QKV Metal shader**: `fused_qkv_f32` kernel that computes Q, K, V matrix-vector projections in a single GPU dispatch. Each thread computes one output element across the combined Q+K+V output space, reading the input vector `x` once from shared memory instead of three times.
+- **`MetalGpu::fused_qkv_f32()`**: GPU dispatch method that transfers Wq, Wk, Wv, and x to Metal, dispatches the fused kernel, and returns (Q, K, V) vectors. Falls back to CPU for small tensors (< 4096 total elements).
+- **`MetalCompute::fused_qkv_f32()`**: High-level wrapper that auto-dispatches to GPU when Metal is available, CPU otherwise.
+- **`fused_qkv_f32_cpu()`**: CPU reference implementation using three separate NEON-accelerated matvecs.
+- **`multi_head_attention_gpu()`**: New attention function that accepts an optional `MetalCompute` reference and uses fused QKV projection for GPU-accelerated attention. Drop-in replacement for `multi_head_attention_cached()` with transparent CPU fallback.
+- **6 new tests** (396 total): fused QKV CPU basic, fused QKV matches separate matvecs, GPU-vs-CPU numerical match, MetalCompute integration, GPU attention matches CPU, GPU attention with Metal — all passing.
+
+### Technical Details
+- Each transformer layer performs 3 separate matvec dispatches for Q, K, V projections. The fused kernel reduces this to 1 dispatch with 1 command buffer, eliminating 2× command buffer creation/commit overhead per layer per token.
+- Thread grid spans `q_dim + kv_dim + kv_dim` threads. Each thread determines which projection (Q/K/V) it belongs to via simple offset arithmetic, then computes the dot product with 4-wide unrolling.
+- For a 4096-dim model with GQA (32 Q heads, 8 KV heads, head_dim=128): total output = 4096 + 1024 + 1024 = 6144 threads, well within Metal's parallel capacity.
+- The input vector `x` is read from a single GPU buffer by all threads, benefiting from Metal's L2 cache — versus 3 separate dispatches each re-fetching `x` from main memory.
+
+### Why This Matters
+In transformer inference, QKV projection is the first compute step per layer and runs every token. On Apple Silicon, Metal command buffer creation has non-trivial overhead (~10-20μs per dispatch). For 80-layer models, 3 dispatches/layer × 80 layers = 240 dispatches per token just for QKV. The fused kernel cuts this to 80 dispatches, saving ~1.6-3.2ms per token. Combined with the memory bandwidth savings from single `x` buffer read, this improves tok/s especially for large models where QKV projection dominates per-layer time.
+
+### Changed
+- `kernels.metal`: Added `fused_qkv_f32` kernel (~55 lines)
+- `gpu.rs`: Added `fused_qkv_f32` pipeline + dispatch method
+- `compute.rs`: Added `MetalCompute::fused_qkv_f32()` + `fused_qkv_f32_cpu()` function
+- `attention.rs`: Added `multi_head_attention_gpu()` with fused QKV integration
+- Cargo.toml version bumped to 1.31.0
+
 ## v1.30.0 — Fused Residual + RMSNorm Metal Kernel (2026-02-23)
 
 ### Added

@@ -1498,3 +1498,62 @@ kernel void fused_swiglu_f32(
     float silu_gate = gate_dot / (1.0 + exp(-gate_dot));
     out[tid] = silu_gate * up_dot;
 }
+
+// ============================================================
+// Fused QKV Projection: compute Q, K, V in a single dispatch
+// Each thread computes one output row across all three matrices.
+// tid in [0, q_dim + kv_dim + kv_dim) maps to Q, K, or V output.
+// Single read of x[] shared across all three projections.
+// ============================================================
+kernel void fused_qkv_f32(
+    device const float* wq       [[buffer(0)]],  // [q_dim, n_embd]
+    device const float* wk       [[buffer(1)]],  // [kv_dim, n_embd]
+    device const float* wv       [[buffer(2)]],  // [kv_dim, n_embd]
+    device const float* x        [[buffer(3)]],  // [n_embd]
+    device float* q_out          [[buffer(4)]],  // [q_dim]
+    device float* k_out          [[buffer(5)]],  // [kv_dim]
+    device float* v_out          [[buffer(6)]],  // [kv_dim]
+    constant uint& q_dim         [[buffer(7)]],
+    constant uint& kv_dim        [[buffer(8)]],
+    constant uint& n_embd        [[buffer(9)]],
+    uint tid                     [[thread_position_in_grid]]
+) {
+    const uint total = q_dim + kv_dim + kv_dim;
+    if (tid >= total) return;
+
+    // Determine which projection and row
+    device const float* w;
+    device float* out;
+    uint row;
+
+    if (tid < q_dim) {
+        w = wq;
+        out = q_out;
+        row = tid;
+    } else if (tid < q_dim + kv_dim) {
+        w = wk;
+        out = k_out;
+        row = tid - q_dim;
+    } else {
+        w = wv;
+        out = v_out;
+        row = tid - q_dim - kv_dim;
+    }
+
+    const uint row_off = row * n_embd;
+    float sum = 0.0;
+
+    // 4-wide accumulation for throughput
+    uint i = 0;
+    for (; i + 3 < n_embd; i += 4) {
+        sum += w[row_off + i]     * x[i]
+             + w[row_off + i + 1] * x[i + 1]
+             + w[row_off + i + 2] * x[i + 2]
+             + w[row_off + i + 3] * x[i + 3];
+    }
+    for (; i < n_embd; i++) {
+        sum += w[row_off + i] * x[i];
+    }
+
+    out[row] = sum;
+}
