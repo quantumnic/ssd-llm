@@ -59,6 +59,8 @@ struct GpuPipelines {
     moe_gate_logits: ComputePipelineState,
     moe_topk_softmax: ComputePipelineState,
     moe_expert_swiglu: ComputePipelineState,
+    fused_rmsnorm_linear_f32: ComputePipelineState,
+    compute_inv_rms: ComputePipelineState,
 }
 
 unsafe impl Send for MetalGpu {}
@@ -142,6 +144,8 @@ impl MetalGpu {
             moe_gate_logits: make_pipeline("moe_gate_logits")?,
             moe_topk_softmax: make_pipeline("moe_topk_softmax")?,
             moe_expert_swiglu: make_pipeline("moe_expert_swiglu")?,
+            fused_rmsnorm_linear_f32: make_pipeline("fused_rmsnorm_linear_f32")?,
+            compute_inv_rms: make_pipeline("compute_inv_rms")?,
         })
     }
 
@@ -1081,6 +1085,86 @@ impl MetalGpu {
         let k = self.read_buffer::<f32>(&k_buf, kv_dim);
         let v = self.read_buffer::<f32>(&v_buf, kv_dim);
         (q, k, v)
+    }
+
+    /// Fused RMSNorm + Output Projection: logits = W_out × rmsnorm(hidden_state)
+    /// Two GPU dispatches (inv_rms computation + fused norm+matmul) but only one
+    /// round-trip, eliminating the intermediate normalized hidden state buffer.
+    #[cfg(target_os = "macos")]
+    pub fn fused_rmsnorm_linear_f32(
+        &self,
+        x: &[f32],
+        norm_weight: &[f32],
+        out_weight: &[f32],
+        vocab_size: usize,
+        n_embd: usize,
+    ) -> Vec<f32> {
+        let opts = MTLResourceOptions::StorageModeShared;
+
+        let x_buf =
+            self.device
+                .new_buffer_with_data(x.as_ptr() as *const _, (x.len() * 4) as u64, opts);
+        let nw_buf = self.device.new_buffer_with_data(
+            norm_weight.as_ptr() as *const _,
+            (norm_weight.len() * 4) as u64,
+            opts,
+        );
+        let ow_buf = self.device.new_buffer_with_data(
+            out_weight.as_ptr() as *const _,
+            (out_weight.len() * 4) as u64,
+            opts,
+        );
+        let logits_buf = self.device.new_buffer((vocab_size * 4) as u64, opts);
+        let rms_buf = self.device.new_buffer(4u64, opts);
+
+        let n_embd_u32 = n_embd as u32;
+        let vocab_u32 = vocab_size as u32;
+        let eps: f32 = 1e-5;
+
+        let cmd = self.queue.new_command_buffer();
+
+        // Phase 1: Compute inv_rms (single thread)
+        {
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&self.pipelines.compute_inv_rms);
+            enc.set_buffer(0, Some(&x_buf), 0);
+            enc.set_buffer(1, Some(&rms_buf), 0);
+            enc.set_bytes(2, 4, &n_embd_u32 as *const u32 as *const _);
+            enc.set_bytes(3, 4, &eps as *const f32 as *const _);
+            enc.dispatch_threads(MTLSize::new(1, 1, 1), MTLSize::new(1, 1, 1));
+            enc.end_encoding();
+        }
+
+        // Phase 2: Fused norm + projection (one thread per vocab entry)
+        {
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&self.pipelines.fused_rmsnorm_linear_f32);
+            enc.set_buffer(0, Some(&x_buf), 0);
+            enc.set_buffer(1, Some(&nw_buf), 0);
+            enc.set_buffer(2, Some(&ow_buf), 0);
+            enc.set_buffer(3, Some(&logits_buf), 0);
+            enc.set_bytes(4, 4, &vocab_u32 as *const u32 as *const _);
+            enc.set_bytes(5, 4, &n_embd_u32 as *const u32 as *const _);
+            enc.set_bytes(6, 4, &eps as *const f32 as *const _);
+            enc.set_buffer(7, Some(&rms_buf), 0);
+
+            let threads = MTLSize::new(vocab_size as u64, 1, 1);
+            let tg = MTLSize::new(
+                self.pipelines
+                    .fused_rmsnorm_linear_f32
+                    .max_total_threads_per_threadgroup()
+                    .min(vocab_size as u64),
+                1,
+                1,
+            );
+            enc.dispatch_threads(threads, tg);
+            enc.end_encoding();
+        }
+
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        self.read_buffer::<f32>(&logits_buf, vocab_size)
     }
 
     #[cfg(target_os = "macos")]

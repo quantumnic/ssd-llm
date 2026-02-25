@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.34.0 — Fused RMSNorm + Output Projection Metal Kernel (2026-02-25)
+
+### Added
+
+- **Fused RMSNorm + Linear Output Metal shader**: `fused_rmsnorm_linear_f32` kernel that computes `logits = W_out × rmsnorm(hidden_state)` in a single GPU dispatch. Each thread computes one vocabulary logit by fusing the normalization weight multiplication into the dot product: `logit[i] = inv_rms * dot(W_out[i] * norm_weight, x)`. Eliminates the intermediate normalized hidden state buffer entirely.
+- **`compute_inv_rms` Metal kernel**: Single-thread utility kernel that computes `1/sqrt(sum(x²)/n + eps)` on GPU, executed as phase 1 before the fused projection (phase 2) in the same command buffer.
+- **`MetalGpu::fused_rmsnorm_linear_f32()`**: GPU dispatch method that runs both phases (inv_rms + fused norm-projection) in a single Metal command buffer commit. Falls back to CPU for tensors below the dispatch threshold.
+- **`MetalCompute::fused_rmsnorm_linear_f32()`**: High-level wrapper with automatic GPU/CPU dispatch based on `vocab_size × n_embd` threshold.
+- **`fused_rmsnorm_linear_f32_cpu()`**: CPU reference implementation that normalizes the hidden state, then uses SIMD matvec for projection.
+- **Integrated into both `generate()` and `StreamingGenerator::next_token()`**: The output head (final RMSNorm + vocabulary projection) now uses the fused kernel by default when both `output_norm.weight` and `output.weight` are available, with graceful fallback to the separate-pass path.
+- **3 new tests** (409 total → 412 total): CPU basic correctness, CPU-matches-separate verification, GPU-matches-CPU numerical agreement — all passing.
+
+### Performance
+
+- Eliminates one full memory read/write pass over the hidden state (typically 4096–8192 floats) per generated token by fusing normalization into the projection dot product
+- Particularly impactful for large vocabulary models (128K+ vocab) where the output projection is the single largest matmul in the decode loop
+- Two-phase GPU execution (inv_rms + fused projection) in a single command buffer commit minimizes CPU↔GPU synchronization
+
 ## v1.33.0 — Fused MoE Expert Dispatch Metal Kernel (2026-02-25)
 
 ### Added

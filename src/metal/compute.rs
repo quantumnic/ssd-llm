@@ -319,6 +319,35 @@ impl MetalCompute {
             wq, wk, wv, x, q_dim, kv_dim, n_embd, head_dim, position, theta_base,
         )
     }
+
+    /// Fused RMSNorm + Output Projection: logits = W_out × rmsnorm(hidden_state)
+    /// GPU path computes inv_rms then fused norm+matmul in two back-to-back dispatches.
+    /// CPU fallback normalizes in-place then does standard matvec.
+    pub fn fused_rmsnorm_linear_f32(
+        &self,
+        x: &[f32],
+        norm_weight: &[f32],
+        out_weight: &[f32],
+        vocab_size: usize,
+        n_embd: usize,
+    ) -> Vec<f32> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(gpu) = &self.gpu {
+                if vocab_size * n_embd >= GPU_DISPATCH_THRESHOLD {
+                    return gpu.fused_rmsnorm_linear_f32(
+                        x,
+                        norm_weight,
+                        out_weight,
+                        vocab_size,
+                        n_embd,
+                    );
+                }
+            }
+        }
+        // CPU fallback
+        fused_rmsnorm_linear_f32_cpu(x, norm_weight, out_weight, vocab_size, n_embd)
+    }
 }
 
 /// SIMD-friendly matrix-vector multiply.
@@ -475,6 +504,30 @@ pub fn fused_qkv_rope_f32_cpu(
     rope_f32_multi_head(&mut q, head_dim, n_head_q, position, theta_base);
     rope_f32_multi_head(&mut k, head_dim, n_head_kv, position, theta_base);
     (q, k, v)
+}
+
+/// CPU fallback for fused RMSNorm + output projection.
+/// Normalizes hidden state, then computes logits via matvec.
+pub fn fused_rmsnorm_linear_f32_cpu(
+    x: &[f32],
+    norm_weight: &[f32],
+    out_weight: &[f32],
+    vocab_size: usize,
+    n_embd: usize,
+) -> Vec<f32> {
+    // Compute inv_rms
+    let sum_sq: f32 = x.iter().map(|v| v * v).sum();
+    let inv_rms = 1.0 / (sum_sq / n_embd as f32 + 1e-5).sqrt();
+
+    // Build normalized hidden state: x_norm[i] = x[i] * inv_rms * norm_weight[i]
+    let x_norm: Vec<f32> = x
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| v * inv_rms * norm_weight.get(i).copied().unwrap_or(1.0))
+        .collect();
+
+    // Project to logits
+    matvec_f32_simd(out_weight, &x_norm, vocab_size, n_embd)
 }
 
 /// Scalar RMS normalization fallback
@@ -3292,6 +3345,98 @@ mod tests {
                 "V at {i}: cpu={} gpu={}",
                 v_cpu[i],
                 v_gpu[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_fused_rmsnorm_linear_cpu_basic() {
+        let n_embd = 8;
+        let vocab_size = 4;
+        let x: Vec<f32> = (0..n_embd).map(|i| (i as f32 + 1.0) * 0.1).collect();
+        let norm_weight: Vec<f32> = vec![1.0; n_embd];
+        // Simple identity-ish output weight
+        let mut out_weight = vec![0.0f32; vocab_size * n_embd];
+        for r in 0..vocab_size {
+            out_weight[r * n_embd + r] = 1.0;
+        }
+
+        let logits =
+            fused_rmsnorm_linear_f32_cpu(&x, &norm_weight, &out_weight, vocab_size, n_embd);
+        assert_eq!(logits.len(), vocab_size);
+
+        // Compare with separate norm + matvec
+        let mut x_norm = x.clone();
+        rmsnorm_f32_fast(&mut x_norm, &norm_weight, 1e-5);
+        let expected = matvec_f32_simd(&out_weight, &x_norm, vocab_size, n_embd);
+        for i in 0..vocab_size {
+            assert!(
+                (logits[i] - expected[i]).abs() < 1e-5,
+                "logit {i}: fused={} expected={}",
+                logits[i],
+                expected[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_fused_rmsnorm_linear_cpu_matches_separate() {
+        let n_embd = 64;
+        let vocab_size = 32;
+        let x: Vec<f32> = (0..n_embd)
+            .map(|i| ((i * 7 + 3) % 13) as f32 * 0.1 - 0.5)
+            .collect();
+        let norm_weight: Vec<f32> = (0..n_embd).map(|i| 0.5 + (i % 5) as f32 * 0.2).collect();
+        let out_weight: Vec<f32> = (0..vocab_size * n_embd)
+            .map(|i| ((i * 11 + 7) % 19) as f32 * 0.05 - 0.4)
+            .collect();
+
+        let fused = fused_rmsnorm_linear_f32_cpu(&x, &norm_weight, &out_weight, vocab_size, n_embd);
+
+        // Separate path
+        let mut x_norm = x.clone();
+        rmsnorm_f32_fast(&mut x_norm, &norm_weight, 1e-5);
+        let separate = matvec_f32_simd(&out_weight, &x_norm, vocab_size, n_embd);
+
+        for i in 0..vocab_size {
+            assert!(
+                (fused[i] - separate[i]).abs() < 1e-4,
+                "logit {i}: fused={} separate={}",
+                fused[i],
+                separate[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_fused_rmsnorm_linear_gpu_matches_cpu() {
+        let gpu = match crate::metal::gpu::MetalGpu::new() {
+            Some(g) => g,
+            None => return, // Skip on non-macOS
+        };
+
+        let n_embd = 128;
+        let vocab_size = 64;
+        let x: Vec<f32> = (0..n_embd)
+            .map(|i| ((i * 7 + 3) % 13) as f32 * 0.1 - 0.5)
+            .collect();
+        let norm_weight: Vec<f32> = (0..n_embd).map(|i| 0.5 + (i % 5) as f32 * 0.2).collect();
+        let out_weight: Vec<f32> = (0..vocab_size * n_embd)
+            .map(|i| ((i * 11 + 7) % 19) as f32 * 0.05 - 0.4)
+            .collect();
+
+        let cpu_result =
+            fused_rmsnorm_linear_f32_cpu(&x, &norm_weight, &out_weight, vocab_size, n_embd);
+        let gpu_result =
+            gpu.fused_rmsnorm_linear_f32(&x, &norm_weight, &out_weight, vocab_size, n_embd);
+
+        assert_eq!(cpu_result.len(), gpu_result.len());
+        for i in 0..vocab_size {
+            assert!(
+                (cpu_result[i] - gpu_result[i]).abs() < 0.02,
+                "logit {i}: cpu={} gpu={}",
+                cpu_result[i],
+                gpu_result[i]
             );
         }
     }

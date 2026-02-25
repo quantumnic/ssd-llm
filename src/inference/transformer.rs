@@ -541,20 +541,49 @@ pub fn generate(
             break;
         }
 
-        // Final RMS norm + project to vocab
-        let mut final_hidden = hidden_state.clone();
-        if let Ok(norm_w) = streamer.load_named_tensor_f32(gguf, "output_norm.weight") {
-            rms_norm(&mut final_hidden, &norm_w);
-        }
+        // Fused RMSNorm + output projection (v1.34: single GPU dispatch)
+        let mut logits = {
+            let norm_w = streamer
+                .load_named_tensor_f32(gguf, "output_norm.weight")
+                .ok();
+            let out_w = streamer
+                .load_named_tensor_f32(gguf, "output.weight")
+                .ok()
+                .or_else(|| {
+                    streamer
+                        .load_named_tensor_f32(gguf, "token_embd.weight")
+                        .ok()
+                });
 
-        let mut logits = if let Ok(output_weight) =
-            streamer.load_named_tensor_f32(gguf, "output.weight")
-        {
-            matmul_1d(&final_hidden, &output_weight, vocab_size)
-        } else if let Ok(embd_weight) = streamer.load_named_tensor_f32(gguf, "token_embd.weight") {
-            matmul_1d(&final_hidden, &embd_weight, vocab_size)
-        } else {
-            vec![0.0f32; vocab_size]
+            match (norm_w.as_ref(), out_w.as_ref()) {
+                (Some(nw), Some(ow)) => {
+                    // Use fused RMSNorm + linear projection (GPU-accelerated when available)
+                    let mc = crate::metal::compute::MetalCompute::new();
+                    if let Some(ref compute) = mc {
+                        compute.fused_rmsnorm_linear_f32(&hidden_state, nw, ow, vocab_size, n_embd)
+                    } else {
+                        crate::metal::compute::fused_rmsnorm_linear_f32_cpu(
+                            &hidden_state,
+                            nw,
+                            ow,
+                            vocab_size,
+                            n_embd,
+                        )
+                    }
+                }
+                _ => {
+                    // Fallback: separate norm + projection
+                    let mut final_hidden = hidden_state.clone();
+                    if let Some(nw) = norm_w.as_ref() {
+                        rms_norm(&mut final_hidden, nw);
+                    }
+                    if let Some(ow) = out_w.as_ref() {
+                        matmul_1d(&final_hidden, ow, vocab_size)
+                    } else {
+                        vec![0.0f32; vocab_size]
+                    }
+                }
+            }
         };
 
         // Apply grammar constraints to logits
@@ -663,27 +692,55 @@ impl<'a> StreamingGenerator<'a> {
         let n_embd = self.gguf.n_embd() as usize;
         let vocab_size = self.gguf.vocab_size() as usize;
 
-        // Final RMS norm + project to vocab
-        let mut final_hidden = self.hidden_state.clone();
-        if let Ok(norm_w) = self
-            .streamer
-            .load_named_tensor_f32(self.gguf, "output_norm.weight")
-        {
-            rms_norm(&mut final_hidden, &norm_w);
-        }
+        // Fused RMSNorm + output projection (v1.34)
+        let logits = {
+            let norm_w = self
+                .streamer
+                .load_named_tensor_f32(self.gguf, "output_norm.weight")
+                .ok();
+            let out_w = self
+                .streamer
+                .load_named_tensor_f32(self.gguf, "output.weight")
+                .ok()
+                .or_else(|| {
+                    self.streamer
+                        .load_named_tensor_f32(self.gguf, "token_embd.weight")
+                        .ok()
+                });
 
-        let logits = if let Ok(output_weight) = self
-            .streamer
-            .load_named_tensor_f32(self.gguf, "output.weight")
-        {
-            matmul_1d(&final_hidden, &output_weight, vocab_size)
-        } else if let Ok(embd_weight) = self
-            .streamer
-            .load_named_tensor_f32(self.gguf, "token_embd.weight")
-        {
-            matmul_1d(&final_hidden, &embd_weight, vocab_size)
-        } else {
-            vec![0.0f32; vocab_size]
+            match (norm_w.as_ref(), out_w.as_ref()) {
+                (Some(nw), Some(ow)) => {
+                    let mc = crate::metal::compute::MetalCompute::new();
+                    if let Some(ref compute) = mc {
+                        compute.fused_rmsnorm_linear_f32(
+                            &self.hidden_state,
+                            nw,
+                            ow,
+                            vocab_size,
+                            n_embd,
+                        )
+                    } else {
+                        crate::metal::compute::fused_rmsnorm_linear_f32_cpu(
+                            &self.hidden_state,
+                            nw,
+                            ow,
+                            vocab_size,
+                            n_embd,
+                        )
+                    }
+                }
+                _ => {
+                    let mut final_hidden = self.hidden_state.clone();
+                    if let Some(nw) = norm_w.as_ref() {
+                        rms_norm(&mut final_hidden, nw);
+                    }
+                    if let Some(ow) = out_w.as_ref() {
+                        matmul_1d(&final_hidden, ow, vocab_size)
+                    } else {
+                        vec![0.0f32; vocab_size]
+                    }
+                }
+            }
         };
 
         let token_id = self.sampler.sample(&logits);

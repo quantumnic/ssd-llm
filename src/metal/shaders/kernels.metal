@@ -1815,3 +1815,73 @@ kernel void moe_expert_swiglu(
     float silu_gate = gate_val / (1.0f + exp(-gate_val));
     intermediate[tid] = silu_gate * up_val;
 }
+
+// ============================================================
+// Fused RMSNorm + Output Projection: logits = (W_out × rmsnorm(x))
+// Two-phase kernel:
+//   Phase 1: Parallel reduction to compute sum-of-squares of x
+//   Phase 2: Each thread computes one logit = dot(W_out[row], norm(x))
+// This eliminates the intermediate normalized hidden state buffer.
+// ============================================================
+
+/// Phase 1: Compute sum of squares and element count for RMSNorm,
+/// then fuse with output projection in a single dispatch.
+/// Each thread computes one output logit, normalizing x on-the-fly.
+///
+/// For vocab_size up to ~128K this is efficient since each thread
+/// reads x once (n_embd typically 4096-8192), and the weight matrix
+/// is read in a streaming pattern.
+kernel void fused_rmsnorm_linear_f32(
+    device const float* x            [[buffer(0)]],   // [n_embd] hidden state
+    device const float* norm_weight  [[buffer(1)]],   // [n_embd] RMSNorm weight
+    device const float* out_weight   [[buffer(2)]],   // [vocab_size, n_embd] output projection
+    device float* logits             [[buffer(3)]],   // [vocab_size] output logits
+    constant uint& vocab_size        [[buffer(4)]],
+    constant uint& n_embd            [[buffer(5)]],
+    constant float& eps              [[buffer(6)]],
+    device float* rms_inv            [[buffer(7)]],   // [1] pre-computed inv_rms (0 = needs compute)
+    uint tid                         [[thread_position_in_grid]]
+) {
+    if (tid >= vocab_size) return;
+
+    // Read pre-computed inv_rms
+    float inv_rms = rms_inv[0];
+
+    // Compute dot product: logit = dot(out_weight[tid], rmsnorm(x))
+    //   = dot(out_weight[tid], x * inv_rms * norm_weight)
+    //   = inv_rms * dot(out_weight[tid] * norm_weight, x)
+    // We fuse the norm_weight multiplication into the dot product.
+    uint row_off = tid * n_embd;
+    float sum = 0.0f;
+
+    uint i = 0;
+    for (; i + 3 < n_embd; i += 4) {
+        float4 xv = float4(x[i], x[i+1], x[i+2], x[i+3]);
+        float4 nw = float4(norm_weight[i], norm_weight[i+1], norm_weight[i+2], norm_weight[i+3]);
+        float4 wv = float4(out_weight[row_off+i], out_weight[row_off+i+1],
+                           out_weight[row_off+i+2], out_weight[row_off+i+3]);
+        sum += dot(wv * nw, xv);
+    }
+    for (; i < n_embd; i++) {
+        sum += out_weight[row_off + i] * norm_weight[i] * x[i];
+    }
+
+    logits[tid] = sum * inv_rms;
+}
+
+/// Compute inverse RMS for fused_rmsnorm_linear (single-thread utility kernel)
+kernel void compute_inv_rms(
+    device const float* x     [[buffer(0)]],   // [n_embd]
+    device float* rms_inv     [[buffer(1)]],   // [1] output
+    constant uint& n_embd     [[buffer(2)]],
+    constant float& eps       [[buffer(3)]],
+    uint tid                  [[thread_position_in_grid]]
+) {
+    if (tid != 0) return;
+
+    float sumsq = 0.0f;
+    for (uint i = 0; i < n_embd; i++) {
+        sumsq += x[i] * x[i];
+    }
+    rms_inv[0] = rsqrt(sumsq / float(n_embd) + eps);
+}

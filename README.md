@@ -82,6 +82,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🔢 BF16 & F16 Matvec** — Native BF16 (brain float 16) and F16 (IEEE 754 half) matrix-vector multiply on CPU and Metal GPU, enabling direct inference from unquantized model weights without dequantization overhead
 - **📌 Adaptive Layer Pinning** — Automatic hot-layer detection: tracks per-layer access frequency with exponential decay, auto-pins the N hottest layers in RAM (e.g., embeddings, early attention), configurable via `--adaptive-pin N`
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
+- **⚡ Fused RMSNorm + Output Projection** — Single GPU dispatch combines final layer normalization with vocabulary projection, eliminating intermediate buffer allocation and one full memory pass over the hidden state per generated token
 
 ## Installation
 
