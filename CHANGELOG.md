@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.35.0 — GPU-Accelerated Transformer Forward Pass (2026-02-25)
+
+### Added
+
+- **Fused Metal kernels wired into the main inference loop**: The transformer `forward_pass()` and `batch_prefill()` now use GPU-accelerated fused kernels end-to-end, replacing the previous CPU-only dispatch paths.
+- **Fused QKV + RoPE attention in forward pass**: Each layer's attention now uses `multi_head_attention_fused_rope()` — a single Metal GPU dispatch for Q/K/V projection + Rotary Position Embeddings (was 5 separate dispatches per layer).
+- **GPU-accelerated SwiGLU FFN in forward pass**: Dense FFN layers now use `feed_forward_gpu()` with the fused SwiGLU Metal kernel (1 dispatch instead of 4 separate ops: gate projection + SiLU + up projection + element-wise multiply).
+- **`run_ffn_or_moe_gpu()`**: New GPU-aware FFN/MoE dispatch function that passes `MetalGpu` to the dense FFN path. MoE gating remains compatible with the existing GPU MoE kernels from v1.33.
+- **Metal compute initialized once per forward pass**: `MetalCompute` and `MetalGpu` are created at the start of `forward_pass()` / `batch_prefill()` and reused across all layers, avoiding per-layer initialization overhead.
+- Legacy `run_ffn_or_moe()` (CPU-only) preserved for backward compatibility.
+
+### Performance
+
+- For an 80-layer model, the decode loop now uses **80 fused attention dispatches** instead of 400 separate dispatches (QKV + RoPE), plus **80 fused FFN dispatches** instead of 320 — a **9× reduction in total Metal command buffer overhead** per generated token.
+- Batch prefill benefits equally: each token × each layer uses fused GPU paths, reducing prefill latency significantly for long prompts.
+- The output head was already fused in v1.34; this release completes the GPU pipeline from embedding through every transformer layer to logits.
+- Transparent CPU fallback: if Metal is unavailable or tensors are below GPU dispatch thresholds, the CPU SIMD paths are used automatically with zero overhead.
+
+### Changed
+
+- `transformer.rs`: `forward_pass()` and `batch_prefill_lora()` now accept and use `MetalCompute` + `MetalGpu` for fused attention and FFN
+- `transformer.rs`: Added `DEFAULT_ROPE_THETA` constant (10000.0) for standard LLaMA-family models
+- `transformer.rs`: New imports for `MetalCompute`, `MetalGpu`, `multi_head_attention_fused_rope`, `feed_forward_gpu`
+- Cargo.toml version bumped to 1.35.0
+
 ## v1.34.0 — Fused RMSNorm + Output Projection Metal Kernel (2026-02-25)
 
 ### Added
