@@ -1500,6 +1500,136 @@ kernel void fused_swiglu_f32(
 }
 
 // ============================================================
+// Fused QKV Projection + RoPE: compute Q, K, V and apply Rotary
+// Position Embeddings in a single dispatch.
+// Each thread computes one output element of the combined Q+K+V space,
+// then applies RoPE rotation to Q and K elements in-place.
+// V elements pass through unchanged.
+//
+// Buffer layout:
+//   wq: [q_dim, n_embd], wk: [kv_dim, n_embd], wv: [kv_dim, n_embd]
+//   x:  [n_embd]
+//   q_out: [q_dim], k_out: [kv_dim], v_out: [kv_dim]
+//   params: {q_dim, kv_dim, n_embd, head_dim, position, theta_base_bits}
+//
+// RoPE is applied to Q (n_head_q heads) and K (n_head_kv heads).
+// For each head, dimension pairs (2i, 2i+1) are rotated by:
+//   angle = position * freq, where freq = 1/theta^(2i/head_dim)
+// ============================================================
+kernel void fused_qkv_rope_f32(
+    device const float* wq       [[buffer(0)]],
+    device const float* wk       [[buffer(1)]],
+    device const float* wv       [[buffer(2)]],
+    device const float* x        [[buffer(3)]],
+    device float* q_out          [[buffer(4)]],
+    device float* k_out          [[buffer(5)]],
+    device float* v_out          [[buffer(6)]],
+    constant uint* params        [[buffer(7)]],
+    uint tid                     [[thread_position_in_grid]]
+) {
+    const uint q_dim    = params[0];
+    const uint kv_dim   = params[1];
+    const uint n_embd   = params[2];
+    const uint head_dim = params[3];
+    const uint position = params[4];
+    const float theta_base = as_type<float>(params[5]);
+
+    const uint total = q_dim + kv_dim + kv_dim;
+    if (tid >= total) return;
+
+    // Determine which projection and row
+    device const float* w;
+    uint row;
+    uint projection; // 0=Q, 1=K, 2=V
+
+    if (tid < q_dim) {
+        w = wq;
+        row = tid;
+        projection = 0;
+    } else if (tid < q_dim + kv_dim) {
+        w = wk;
+        row = tid - q_dim;
+        projection = 1;
+    } else {
+        w = wv;
+        row = tid - q_dim - kv_dim;
+        projection = 2;
+    }
+
+    // Compute matvec dot product
+    const uint row_off = row * n_embd;
+    float sum = 0.0;
+    uint i = 0;
+    for (; i + 3 < n_embd; i += 4) {
+        sum += w[row_off + i]     * x[i]
+             + w[row_off + i + 1] * x[i + 1]
+             + w[row_off + i + 2] * x[i + 2]
+             + w[row_off + i + 3] * x[i + 3];
+    }
+    for (; i < n_embd; i++) {
+        sum += w[row_off + i] * x[i];
+    }
+
+    // Write result
+    device float* out;
+    if (projection == 0) {
+        out = q_out;
+    } else if (projection == 1) {
+        out = k_out;
+    } else {
+        out = v_out;
+    }
+    out[row] = sum;
+
+    // Apply RoPE to Q and K (V passes through)
+    // RoPE works on pairs (2i, 2i+1) within each head.
+    // We need to synchronize pairs — each even-index thread handles its pair.
+    if (projection == 2) return; // V: no RoPE
+
+    uint dim_in_head = row % head_dim;
+
+    // Only even-indexed dimensions initiate the pair rotation
+    // Odd dimensions are handled by their even partner
+    if (dim_in_head % 2 != 0) return;
+
+    // Ensure the partner exists
+    if (row + 1 >= (projection == 0 ? q_dim : kv_dim)) return;
+
+    uint pair_idx = dim_in_head / 2;
+    float freq = 1.0 / pow(theta_base, float(pair_idx * 2) / float(head_dim));
+    float angle = float(position) * freq;
+    float cos_val = cos(angle);
+    float sin_val = sin(angle);
+
+    // Read the pair, rotate, write back
+    // Use threadgroup_barrier to ensure both values are written before rotation
+    // Actually, since we wrote out[row] above and the partner thread also wrote
+    // out[row+1], we need a memory fence. But Metal dispatch doesn't guarantee
+    // ordering between threads. So we must compute both dot products here.
+
+    // Recompute the partner's dot product (row+1)
+    const uint partner_row = row + 1;
+    const uint partner_row_off = partner_row * n_embd;
+    float sum1 = 0.0;
+    uint j = 0;
+    for (; j + 3 < n_embd; j += 4) {
+        sum1 += w[partner_row_off + j]     * x[j]
+              + w[partner_row_off + j + 1] * x[j + 1]
+              + w[partner_row_off + j + 2] * x[j + 2]
+              + w[partner_row_off + j + 3] * x[j + 3];
+    }
+    for (; j < n_embd; j++) {
+        sum1 += w[partner_row_off + j] * x[j];
+    }
+
+    // Apply rotation: [cos -sin; sin cos] * [x0; x1]
+    float x0 = sum;
+    float x1 = sum1;
+    out[row]     = x0 * cos_val - x1 * sin_val;
+    out[row + 1] = x0 * sin_val + x1 * cos_val;
+}
+
+// ============================================================
 // Fused QKV Projection: compute Q, K, V in a single dispatch
 // Each thread computes one output row across all three matrices.
 // tid in [0, q_dim + kv_dim + kv_dim) maps to Q, K, or V output.

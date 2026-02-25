@@ -55,6 +55,7 @@ struct GpuPipelines {
     fused_swiglu_f32: ComputePipelineState,
     fused_residual_rmsnorm_sumsq: ComputePipelineState,
     fused_qkv_f32: ComputePipelineState,
+    fused_qkv_rope_f32: ComputePipelineState,
 }
 
 unsafe impl Send for MetalGpu {}
@@ -134,6 +135,7 @@ impl MetalGpu {
             fused_swiglu_f32: make_pipeline("fused_swiglu_f32")?,
             fused_residual_rmsnorm_sumsq: make_pipeline("fused_residual_rmsnorm_sumsq")?,
             fused_qkv_f32: make_pipeline("fused_qkv_f32")?,
+            fused_qkv_rope_f32: make_pipeline("fused_qkv_rope_f32")?,
         })
     }
 
@@ -792,6 +794,107 @@ impl MetalGpu {
         let tg = MTLSize::new(
             self.pipelines
                 .fused_qkv_f32
+                .max_total_threads_per_threadgroup()
+                .min(total_out as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(threads, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let q = self.read_buffer::<f32>(&q_buf, q_dim);
+        let k = self.read_buffer::<f32>(&k_buf, kv_dim);
+        let v = self.read_buffer::<f32>(&v_buf, kv_dim);
+        (q, k, v)
+    }
+
+    /// Fused QKV projection + RoPE in a single GPU dispatch.
+    /// Computes Q = Wq·x, K = Wk·x, V = Wv·x, then applies RoPE to Q and K.
+    /// Returns (Q_rope, K_rope, V) — ready for attention computation.
+    #[cfg(target_os = "macos")]
+    pub fn fused_qkv_rope_f32(
+        &self,
+        wq: &[f32],
+        wk: &[f32],
+        wv: &[f32],
+        x: &[f32],
+        q_dim: usize,
+        kv_dim: usize,
+        n_embd: usize,
+        head_dim: usize,
+        position: usize,
+        theta_base: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let total_out = q_dim + kv_dim + kv_dim;
+
+        // Don't use GPU for small projections
+        if total_out * n_embd < MIN_GPU_ELEMENTS {
+            let mut q = crate::metal::compute::matvec_f32_simd(wq, x, q_dim, n_embd);
+            let mut k = crate::metal::compute::matvec_f32_simd(wk, x, kv_dim, n_embd);
+            let v = crate::metal::compute::matvec_f32_simd(wv, x, kv_dim, n_embd);
+            // Apply RoPE on CPU for small tensors
+            let n_head_q = q_dim / head_dim;
+            let n_head_kv = kv_dim / head_dim;
+            crate::metal::compute::rope_f32_multi_head(
+                &mut q, head_dim, n_head_q, position, theta_base,
+            );
+            crate::metal::compute::rope_f32_multi_head(
+                &mut k, head_dim, n_head_kv, position, theta_base,
+            );
+            return (q, k, v);
+        }
+
+        let opts = MTLResourceOptions::StorageModeShared;
+
+        let wq_buf =
+            self.device
+                .new_buffer_with_data(wq.as_ptr() as *const _, (wq.len() * 4) as u64, opts);
+        let wk_buf =
+            self.device
+                .new_buffer_with_data(wk.as_ptr() as *const _, (wk.len() * 4) as u64, opts);
+        let wv_buf =
+            self.device
+                .new_buffer_with_data(wv.as_ptr() as *const _, (wv.len() * 4) as u64, opts);
+        let x_buf =
+            self.device
+                .new_buffer_with_data(x.as_ptr() as *const _, (x.len() * 4) as u64, opts);
+        let q_buf = self.device.new_buffer((q_dim * 4) as u64, opts);
+        let k_buf = self.device.new_buffer((kv_dim * 4) as u64, opts);
+        let v_buf = self.device.new_buffer((kv_dim * 4) as u64, opts);
+
+        // Pack params: q_dim, kv_dim, n_embd, head_dim, position, theta_base_bits
+        let params: [u32; 6] = [
+            q_dim as u32,
+            kv_dim as u32,
+            n_embd as u32,
+            head_dim as u32,
+            position as u32,
+            theta_base.to_bits(),
+        ];
+        let params_buf = self.device.new_buffer_with_data(
+            params.as_ptr() as *const _,
+            (params.len() * 4) as u64,
+            opts,
+        );
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.fused_qkv_rope_f32);
+        encoder.set_buffer(0, Some(&wq_buf), 0);
+        encoder.set_buffer(1, Some(&wk_buf), 0);
+        encoder.set_buffer(2, Some(&wv_buf), 0);
+        encoder.set_buffer(3, Some(&x_buf), 0);
+        encoder.set_buffer(4, Some(&q_buf), 0);
+        encoder.set_buffer(5, Some(&k_buf), 0);
+        encoder.set_buffer(6, Some(&v_buf), 0);
+        encoder.set_buffer(7, Some(&params_buf), 0);
+
+        let threads = MTLSize::new(total_out as u64, 1, 1);
+        let tg = MTLSize::new(
+            self.pipelines
+                .fused_qkv_rope_f32
                 .max_total_threads_per_threadgroup()
                 .min(total_out as u64),
             1,

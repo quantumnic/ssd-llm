@@ -289,6 +289,36 @@ impl MetalCompute {
         // CPU fallback
         fused_qkv_f32_cpu(wq, wk, wv, x, q_dim, kv_dim, n_embd)
     }
+
+    /// Fused QKV projection + RoPE. Returns (Q_rope, K_rope, V).
+    /// GPU path computes projection and RoPE in a single dispatch.
+    /// CPU fallback does projection + separate RoPE application.
+    pub fn fused_qkv_rope_f32(
+        &self,
+        wq: &[f32],
+        wk: &[f32],
+        wv: &[f32],
+        x: &[f32],
+        q_dim: usize,
+        kv_dim: usize,
+        n_embd: usize,
+        head_dim: usize,
+        position: usize,
+        theta_base: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(gpu) = &self.gpu {
+                return gpu.fused_qkv_rope_f32(
+                    wq, wk, wv, x, q_dim, kv_dim, n_embd, head_dim, position, theta_base,
+                );
+            }
+        }
+        // CPU fallback
+        fused_qkv_rope_f32_cpu(
+            wq, wk, wv, x, q_dim, kv_dim, n_embd, head_dim, position, theta_base,
+        )
+    }
 }
 
 /// SIMD-friendly matrix-vector multiply.
@@ -393,6 +423,57 @@ pub fn fused_qkv_f32_cpu(
     let q = matvec_f32_simd(wq, x, q_dim, n_embd);
     let k = matvec_f32_simd(wk, x, kv_dim, n_embd);
     let v = matvec_f32_simd(wv, x, kv_dim, n_embd);
+    (q, k, v)
+}
+
+/// Apply RoPE in-place across multiple heads (CPU).
+/// Each head of `head_dim` elements gets rotary embeddings applied to dimension pairs.
+pub fn rope_f32_multi_head(
+    x: &mut [f32],
+    head_dim: usize,
+    n_heads: usize,
+    position: usize,
+    theta_base: f32,
+) {
+    let half_dim = head_dim / 2;
+    for h in 0..n_heads {
+        let base = h * head_dim;
+        for i in 0..half_dim {
+            let freq = 1.0 / theta_base.powf(2.0 * i as f32 / head_dim as f32);
+            let angle = position as f32 * freq;
+            let (sin_val, cos_val) = angle.sin_cos();
+            let idx0 = base + i * 2;
+            let idx1 = idx0 + 1;
+            if idx1 < x.len() {
+                let x0 = x[idx0];
+                let x1 = x[idx1];
+                x[idx0] = x0 * cos_val - x1 * sin_val;
+                x[idx1] = x0 * sin_val + x1 * cos_val;
+            }
+        }
+    }
+}
+
+/// Fused QKV projection + RoPE on CPU: compute Q, K, V and apply RoPE to Q and K.
+pub fn fused_qkv_rope_f32_cpu(
+    wq: &[f32],
+    wk: &[f32],
+    wv: &[f32],
+    x: &[f32],
+    q_dim: usize,
+    kv_dim: usize,
+    n_embd: usize,
+    head_dim: usize,
+    position: usize,
+    theta_base: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut q = matvec_f32_simd(wq, x, q_dim, n_embd);
+    let mut k = matvec_f32_simd(wk, x, kv_dim, n_embd);
+    let v = matvec_f32_simd(wv, x, kv_dim, n_embd);
+    let n_head_q = q_dim / head_dim;
+    let n_head_kv = kv_dim / head_dim;
+    rope_f32_multi_head(&mut q, head_dim, n_head_q, position, theta_base);
+    rope_f32_multi_head(&mut k, head_dim, n_head_kv, position, theta_base);
     (q, k, v)
 }
 
@@ -3078,6 +3159,140 @@ mod tests {
 
         for (i, (a, b)) in x_cpu.iter().zip(x_gpu.iter()).enumerate() {
             assert!((a - b).abs() < 1e-4, "index {i}: cpu={a}, gpu={b}");
+        }
+    }
+
+    #[test]
+    fn test_rope_multi_head_matches_single_head() {
+        let head_dim = 4;
+        let n_heads = 3;
+        let position = 7;
+        let theta = 10000.0f32;
+
+        let mut x: Vec<f32> = (0..n_heads * head_dim)
+            .map(|i| (i as f32 + 1.0) * 0.5)
+            .collect();
+        let orig = x.clone();
+
+        rope_f32_multi_head(&mut x, head_dim, n_heads, position, theta);
+
+        // Verify each head independently
+        for h in 0..n_heads {
+            let base = h * head_dim;
+            for i in 0..head_dim / 2 {
+                let freq = 1.0 / theta.powf(2.0 * i as f32 / head_dim as f32);
+                let angle = position as f32 * freq;
+                let (sin_val, cos_val) = angle.sin_cos();
+                let x0 = orig[base + i * 2];
+                let x1 = orig[base + i * 2 + 1];
+                let expected0 = x0 * cos_val - x1 * sin_val;
+                let expected1 = x0 * sin_val + x1 * cos_val;
+                assert!(
+                    (x[base + i * 2] - expected0).abs() < 1e-5,
+                    "head {h} pair {i}: got {} expected {}",
+                    x[base + i * 2],
+                    expected0
+                );
+                assert!((x[base + i * 2 + 1] - expected1).abs() < 1e-5,);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rope_multi_head_position_zero() {
+        let head_dim = 4;
+        let n_heads = 2;
+        let mut x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let orig = x.clone();
+        rope_f32_multi_head(&mut x, head_dim, n_heads, 0, 10000.0);
+        for i in 0..x.len() {
+            assert!(
+                (x[i] - orig[i]).abs() < 1e-6,
+                "Position 0 should be identity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fused_qkv_rope_cpu_basic() {
+        let n_embd = 4;
+        let q_dim = 4;
+        let kv_dim = 4;
+        let head_dim = 4;
+
+        let x = vec![1.0f32; n_embd];
+        let w = vec![0.1f32; n_embd * n_embd]; // identity-ish
+
+        let (q, k, v) =
+            fused_qkv_rope_f32_cpu(&w, &w, &w, &x, q_dim, kv_dim, n_embd, head_dim, 0, 10000.0);
+
+        // At position 0, RoPE is identity, so q == k == v == plain matvec
+        let plain = matvec_f32_simd(&w, &x, q_dim, n_embd);
+        for i in 0..q_dim {
+            assert!((q[i] - plain[i]).abs() < 1e-6);
+            assert!((k[i] - plain[i]).abs() < 1e-6);
+            assert!((v[i] - plain[i]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_fused_qkv_rope_gpu_matches_cpu() {
+        let gpu = MetalGpu::new();
+        if gpu.is_none() {
+            return;
+        }
+        let gpu = gpu.unwrap();
+
+        let n_embd = 128;
+        let n_head = 4;
+        let n_head_kv = 2;
+        let head_dim = 32;
+        let q_dim = n_head * head_dim;
+        let kv_dim = n_head_kv * head_dim;
+        let position = 10;
+        let theta = 10000.0f32;
+
+        let x: Vec<f32> = (0..n_embd).map(|i| (i as f32 * 0.03).sin()).collect();
+        let wq: Vec<f32> = (0..q_dim * n_embd)
+            .map(|i| ((i * 7 + 3) as f32 % 13.0 - 6.0) * 0.01)
+            .collect();
+        let wk: Vec<f32> = (0..kv_dim * n_embd)
+            .map(|i| ((i * 11 + 5) as f32 % 13.0 - 6.0) * 0.01)
+            .collect();
+        let wv: Vec<f32> = (0..kv_dim * n_embd)
+            .map(|i| ((i * 13 + 7) as f32 % 13.0 - 6.0) * 0.01)
+            .collect();
+
+        let (q_cpu, k_cpu, v_cpu) = fused_qkv_rope_f32_cpu(
+            &wq, &wk, &wv, &x, q_dim, kv_dim, n_embd, head_dim, position, theta,
+        );
+        let (q_gpu, k_gpu, v_gpu) = gpu.fused_qkv_rope_f32(
+            &wq, &wk, &wv, &x, q_dim, kv_dim, n_embd, head_dim, position, theta,
+        );
+
+        for i in 0..q_dim {
+            assert!(
+                (q_cpu[i] - q_gpu[i]).abs() < 0.02,
+                "Q at {i}: cpu={} gpu={}",
+                q_cpu[i],
+                q_gpu[i]
+            );
+        }
+        for i in 0..kv_dim {
+            assert!(
+                (k_cpu[i] - k_gpu[i]).abs() < 0.02,
+                "K at {i}: cpu={} gpu={}",
+                k_cpu[i],
+                k_gpu[i]
+            );
+        }
+        for i in 0..kv_dim {
+            assert!(
+                (v_cpu[i] - v_gpu[i]).abs() < 0.02,
+                "V at {i}: cpu={} gpu={}",
+                v_cpu[i],
+                v_gpu[i]
+            );
         }
     }
 }
