@@ -56,6 +56,9 @@ struct GpuPipelines {
     fused_residual_rmsnorm_sumsq: ComputePipelineState,
     fused_qkv_f32: ComputePipelineState,
     fused_qkv_rope_f32: ComputePipelineState,
+    moe_gate_logits: ComputePipelineState,
+    moe_topk_softmax: ComputePipelineState,
+    moe_expert_swiglu: ComputePipelineState,
 }
 
 unsafe impl Send for MetalGpu {}
@@ -136,6 +139,9 @@ impl MetalGpu {
             fused_residual_rmsnorm_sumsq: make_pipeline("fused_residual_rmsnorm_sumsq")?,
             fused_qkv_f32: make_pipeline("fused_qkv_f32")?,
             fused_qkv_rope_f32: make_pipeline("fused_qkv_rope_f32")?,
+            moe_gate_logits: make_pipeline("moe_gate_logits")?,
+            moe_topk_softmax: make_pipeline("moe_topk_softmax")?,
+            moe_expert_swiglu: make_pipeline("moe_expert_swiglu")?,
         })
     }
 
@@ -582,6 +588,172 @@ impl MetalGpu {
         cmd.wait_until_completed();
 
         self.read_buffer::<f32>(&out_buf, n_head * head_dim)
+    }
+
+    // --- MoE GPU dispatch ---
+
+    /// GPU MoE gating: compute gate logits + softmax + top-K selection.
+    /// Returns (expert_indices, expert_weights) with re-normalized weights.
+    #[cfg(target_os = "macos")]
+    pub fn moe_gating_f32(
+        &self,
+        x: &[f32],
+        gate_weights: &[f32],
+        n_experts: usize,
+        n_experts_used: usize,
+        n_embd: usize,
+    ) -> (Vec<u32>, Vec<f32>) {
+        let x_buf = self.create_buffer_with_data(x);
+        let gate_buf = self.create_buffer_with_data(gate_weights);
+        let logits_buf = self.create_buffer::<f32>(n_experts);
+        let n_embd_buf = self.create_buffer_with_data(&[n_embd as u32]);
+        let n_experts_buf = self.create_buffer_with_data(&[n_experts as u32]);
+
+        // Phase 1: gate logits
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.moe_gate_logits);
+        encoder.set_buffer(0, Some(&gate_buf), 0);
+        encoder.set_buffer(1, Some(&x_buf), 0);
+        encoder.set_buffer(2, Some(&logits_buf), 0);
+        encoder.set_buffer(3, Some(&n_embd_buf), 0);
+        encoder.set_buffer(4, Some(&n_experts_buf), 0);
+        let threads = MTLSize::new(n_experts as u64, 1, 1);
+        let tg = MTLSize::new(
+            self.pipelines
+                .moe_gate_logits
+                .max_total_threads_per_threadgroup()
+                .min(n_experts as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(threads, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        // Phase 2: softmax + top-K
+        let indices_buf = self.create_buffer::<u32>(n_experts_used);
+        let weights_buf = self.create_buffer::<f32>(n_experts_used);
+        let n_used_buf = self.create_buffer_with_data(&[n_experts_used as u32]);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.moe_topk_softmax);
+        encoder.set_buffer(0, Some(&logits_buf), 0);
+        encoder.set_buffer(1, Some(&indices_buf), 0);
+        encoder.set_buffer(2, Some(&weights_buf), 0);
+        encoder.set_buffer(3, Some(&n_experts_buf), 0);
+        encoder.set_buffer(4, Some(&n_used_buf), 0);
+        let one = MTLSize::new(1, 1, 1);
+        encoder.dispatch_threads(one, one);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let indices = self.read_buffer::<u32>(&indices_buf, n_experts_used);
+        let weights = self.read_buffer::<f32>(&weights_buf, n_experts_used);
+        (indices, weights)
+    }
+
+    /// GPU fused MoE expert SwiGLU: computes the intermediate = silu(gate·x) * (up·x)
+    /// Returns the intermediate vector of size n_ff, ready for down_proj matvec.
+    #[cfg(target_os = "macos")]
+    pub fn moe_expert_swiglu_f32(
+        &self,
+        x: &[f32],
+        w_gate: &[f32],
+        w_up: &[f32],
+        n_embd: usize,
+        n_ff: usize,
+    ) -> Vec<f32> {
+        let x_buf = self.create_buffer_with_data(x);
+        let gate_buf = self.create_buffer_with_data(w_gate);
+        let up_buf = self.create_buffer_with_data(w_up);
+        let inter_buf = self.create_buffer::<f32>(n_ff);
+        let n_ff_buf = self.create_buffer_with_data(&[n_ff as u32]);
+        let n_embd_buf = self.create_buffer_with_data(&[n_embd as u32]);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.moe_expert_swiglu);
+        encoder.set_buffer(0, Some(&x_buf), 0);
+        encoder.set_buffer(1, Some(&gate_buf), 0);
+        encoder.set_buffer(2, Some(&up_buf), 0);
+        encoder.set_buffer(3, Some(&inter_buf), 0);
+        encoder.set_buffer(4, Some(&n_ff_buf), 0);
+        encoder.set_buffer(5, Some(&n_embd_buf), 0);
+        let threads = MTLSize::new(n_ff as u64, 1, 1);
+        let tg = MTLSize::new(
+            self.pipelines
+                .moe_expert_swiglu
+                .max_total_threads_per_threadgroup()
+                .min(n_ff as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(threads, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        self.read_buffer::<f32>(&inter_buf, n_ff)
+    }
+
+    /// Full GPU-accelerated MoE forward pass: gating + expert dispatch + weighted sum.
+    /// Dispatches gating on GPU, then runs each selected expert's SwiGLU + down_proj
+    /// on GPU, accumulating the weighted output.
+    #[cfg(target_os = "macos")]
+    pub fn moe_forward_f32(
+        &self,
+        x: &[f32],
+        gate_weights: &[f32],
+        expert_w_gates: &[&[f32]],
+        expert_w_ups: &[&[f32]],
+        expert_w_downs: &[&[f32]],
+        n_experts: usize,
+        n_experts_used: usize,
+        n_embd: usize,
+    ) -> Vec<f32> {
+        let n_ff = if !expert_w_gates.is_empty() {
+            expert_w_gates[0].len() / n_embd
+        } else {
+            return vec![0.0f32; n_embd];
+        };
+
+        // GPU gating
+        let (indices, weights) =
+            self.moe_gating_f32(x, gate_weights, n_experts, n_experts_used, n_embd);
+
+        // Dispatch selected experts on GPU
+        let mut output = vec![0.0f32; n_embd];
+
+        for (idx, weight) in indices.iter().zip(weights.iter()) {
+            let expert_idx = *idx as usize;
+            if expert_idx >= n_experts {
+                continue;
+            }
+
+            // Fused SwiGLU on GPU
+            let intermediate = self.moe_expert_swiglu_f32(
+                x,
+                expert_w_gates[expert_idx],
+                expert_w_ups[expert_idx],
+                n_embd,
+                n_ff,
+            );
+
+            // down_proj matvec on GPU
+            let expert_out =
+                self.matvec_f32(expert_w_downs[expert_idx], &intermediate, n_embd, n_ff);
+
+            // Weighted accumulation
+            for (o, e) in output.iter_mut().zip(expert_out.iter()) {
+                *o += weight * e;
+            }
+        }
+
+        output
     }
 
     // --- Buffer helpers ---

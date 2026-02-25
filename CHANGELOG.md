@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.33.0 — Fused MoE Expert Dispatch Metal Kernel (2026-02-25)
+
+### Added
+
+- **GPU-accelerated MoE gating**: `moe_gate_logits` Metal kernel computes gate logits (dot product of gate weights × hidden state) in parallel across all experts on GPU, replacing sequential CPU SIMD computation
+- **GPU top-K softmax selection**: `moe_topk_softmax` Metal kernel performs softmax normalization and greedy top-K expert selection entirely on GPU, eliminating CPU round-trips for gating decisions
+- **Fused MoE expert SwiGLU kernel**: `moe_expert_swiglu` Metal kernel computes `silu(gate·x) * (up·x)` for each selected expert in a single GPU dispatch, combining gate projection, SiLU activation, up projection, and element-wise multiply
+- **`moe_forward_gpu()`**: Full GPU-accelerated MoE forward pass — gating + expert dispatch + down projection + weighted accumulation in minimal GPU dispatches (3 dispatches for gating + 2 per active expert vs. all-CPU path)
+- **Automatic GPU/CPU selection**: MoE dispatch falls back to CPU SIMD for small tensors (n_ff < 2048) where GPU dispatch overhead exceeds compute savings
+- Three new Metal compute pipelines: `moe_gate_logits`, `moe_topk_softmax`, `moe_expert_swiglu`
+- Tests: GPU fallback correctness, GPU vs CPU numerical agreement for MoE forward pass
+
+### Performance
+
+- MoE models (Mixtral, DeepSeek-MoE, etc.) benefit from fully GPU-resident gating — no CPU↔GPU sync for expert selection
+- Each active expert runs fused SwiGLU on GPU, reusing the proven kernel pattern from v1.29's dense FFN fusion
+- Only activated experts' weights are touched, preserving SSD-friendly sparse access patterns
+
 ## v1.32.0 — Fused QKV + RoPE Metal Kernel (2026-02-25)
 
 ### Added

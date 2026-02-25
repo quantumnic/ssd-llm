@@ -159,7 +159,7 @@ mod tests {
     fn test_feed_forward_known_values() {
         // Verify numerical correctness with known inputs
         let n_embd = 2;
-        let n_ff = 2;
+        let _n_ff = 2;
         // Identity-like gate and up weights
         let w_gate = vec![1.0, 0.0, 0.0, 1.0]; // [n_ff, n_embd]
         let w_up = vec![1.0, 0.0, 0.0, 1.0];

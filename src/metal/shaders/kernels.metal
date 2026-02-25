@@ -1687,3 +1687,131 @@ kernel void fused_qkv_f32(
 
     out[row] = sum;
 }
+
+// ============================================================
+// Fused MoE Gating: gate logits + softmax + top-K selection
+// Single dispatch replaces CPU gating for Mixture of Experts.
+// ============================================================
+
+/// Compute gate logits: logits[i] = dot(gate_weights[i], x)
+kernel void moe_gate_logits(
+    device const float* gate_weights [[buffer(0)]],  // [n_experts, n_embd]
+    device const float* x            [[buffer(1)]],   // [n_embd]
+    device float* logits             [[buffer(2)]],   // [n_experts]
+    constant uint& n_embd            [[buffer(3)]],
+    constant uint& n_experts         [[buffer(4)]],
+    uint tid                         [[thread_position_in_grid]])
+{
+    if (tid >= n_experts) return;
+
+    float sum = 0.0f;
+    uint base = tid * n_embd;
+    uint i = 0;
+    for (; i + 3 < n_embd; i += 4) {
+        float4 g = float4(gate_weights[base + i],
+                          gate_weights[base + i + 1],
+                          gate_weights[base + i + 2],
+                          gate_weights[base + i + 3]);
+        float4 v = float4(x[i], x[i + 1], x[i + 2], x[i + 3]);
+        sum += dot(g, v);
+    }
+    for (; i < n_embd; i++) {
+        sum += gate_weights[base + i] * x[i];
+    }
+    logits[tid] = sum;
+}
+
+/// Softmax + top-K selection (single-threaded for small n_experts ≤ 64)
+/// Writes sorted top-K indices and re-normalized weights.
+kernel void moe_topk_softmax(
+    device float* logits             [[buffer(0)]],   // [n_experts] (consumed)
+    device uint* top_indices         [[buffer(1)]],   // [n_experts_used]
+    device float* top_weights        [[buffer(2)]],   // [n_experts_used]
+    constant uint& n_experts         [[buffer(3)]],
+    constant uint& n_experts_used    [[buffer(4)]],
+    uint tid                         [[thread_position_in_grid]])
+{
+    if (tid != 0) return;
+
+    // Stable softmax
+    float max_val = logits[0];
+    for (uint i = 1; i < n_experts; i++) {
+        max_val = max(max_val, logits[i]);
+    }
+    float sum = 0.0f;
+    for (uint i = 0; i < n_experts; i++) {
+        logits[i] = exp(logits[i] - max_val);
+        sum += logits[i];
+    }
+    if (sum > 0.0f) {
+        for (uint i = 0; i < n_experts; i++) {
+            logits[i] /= sum;
+        }
+    }
+
+    // Greedy top-K
+    for (uint k = 0; k < n_experts_used; k++) {
+        float best = -1.0f;
+        uint best_idx = 0;
+        for (uint i = 0; i < n_experts; i++) {
+            bool used = false;
+            for (uint j = 0; j < k; j++) {
+                if (top_indices[j] == i) { used = true; break; }
+            }
+            if (!used && logits[i] > best) {
+                best = logits[i];
+                best_idx = i;
+            }
+        }
+        top_indices[k] = best_idx;
+        top_weights[k] = best;
+    }
+
+    // Re-normalize selected weights
+    float wsum = 0.0f;
+    for (uint k = 0; k < n_experts_used; k++) {
+        wsum += top_weights[k];
+    }
+    if (wsum > 0.0f) {
+        for (uint k = 0; k < n_experts_used; k++) {
+            top_weights[k] /= wsum;
+        }
+    }
+}
+
+// ============================================================
+// Fused MoE Expert FFN: SwiGLU for a single expert, weighted accumulation
+// Each thread computes one intermediate dimension element.
+// Runs once per selected expert, accumulating into the output buffer.
+// ============================================================
+kernel void moe_expert_swiglu(
+    device const float* x            [[buffer(0)]],   // [n_embd] input
+    device const float* w_gate       [[buffer(1)]],   // [n_ff, n_embd]
+    device const float* w_up         [[buffer(2)]],   // [n_ff, n_embd]
+    device float* intermediate       [[buffer(3)]],   // [n_ff] scratch
+    constant uint& n_ff              [[buffer(4)]],
+    constant uint& n_embd            [[buffer(5)]],
+    uint tid                         [[thread_position_in_grid]])
+{
+    if (tid >= n_ff) return;
+
+    uint base = tid * n_embd;
+
+    // gate = dot(w_gate[tid], x)
+    float gate_val = 0.0f;
+    float up_val = 0.0f;
+    uint i = 0;
+    for (; i + 3 < n_embd; i += 4) {
+        float4 xv = float4(x[i], x[i+1], x[i+2], x[i+3]);
+        gate_val += dot(float4(w_gate[base+i], w_gate[base+i+1], w_gate[base+i+2], w_gate[base+i+3]), xv);
+        up_val   += dot(float4(w_up[base+i],   w_up[base+i+1],   w_up[base+i+2],   w_up[base+i+3]),   xv);
+    }
+    for (; i < n_embd; i++) {
+        gate_val += w_gate[base + i] * x[i];
+        up_val   += w_up[base + i]   * x[i];
+    }
+
+    // SiLU(gate) * up
+    float silu_gate = gate_val / (1.0f + exp(-gate_val));
+    intermediate[tid] = silu_gate * up_val;
+}

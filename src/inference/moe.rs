@@ -156,6 +156,62 @@ pub fn moe_forward(
     output
 }
 
+/// Minimum elements to justify GPU dispatch for MoE gating + expert FFN
+const MIN_GPU_MOE_ELEMENTS: usize = 2048;
+
+/// Run MoE forward pass with optional Metal GPU acceleration.
+///
+/// When a GPU is available and tensors are large enough, dispatches:
+///   1. Gating (gate logits + softmax + top-K) entirely on GPU
+///   2. Each selected expert's SwiGLU FFN on GPU (fused gate+silu+up+mul kernel)
+///   3. Down-projection matvec on GPU
+///   4. Weighted accumulation on CPU (negligible cost for n_embd elements)
+///
+/// Falls back to CPU SIMD when GPU is unavailable or tensors are small.
+pub fn moe_forward_gpu(
+    x: &[f32],
+    gate_weights: &[f32],
+    experts: &[ExpertWeights<'_>],
+    config: &MoeConfig,
+    n_embd: usize,
+    gpu: Option<&crate::metal::gpu::MetalGpu>,
+) -> Vec<f32> {
+    assert!(config.validate(), "Invalid MoE configuration");
+    assert_eq!(experts.len(), config.n_experts, "Expert count mismatch");
+
+    // Check if GPU dispatch is worthwhile
+    #[cfg(target_os = "macos")]
+    if let Some(gpu) = gpu {
+        let n_ff = if !experts.is_empty() {
+            experts[0].w_gate.len() / n_embd
+        } else {
+            0
+        };
+        if n_ff >= MIN_GPU_MOE_ELEMENTS && gpu.is_available() {
+            let w_gates: Vec<&[f32]> = experts.iter().map(|e| e.w_gate).collect();
+            let w_ups: Vec<&[f32]> = experts.iter().map(|e| e.w_up).collect();
+            let w_downs: Vec<&[f32]> = experts.iter().map(|e| e.w_down).collect();
+            return gpu.moe_forward_f32(
+                x,
+                gate_weights,
+                &w_gates,
+                &w_ups,
+                &w_downs,
+                config.n_experts,
+                config.n_experts_used,
+                n_embd,
+            );
+        }
+    }
+
+    // Suppress unused variable warning on non-macOS
+    #[cfg(not(target_os = "macos"))]
+    let _ = gpu;
+
+    // CPU fallback
+    moe_forward(x, gate_weights, experts, config, n_embd)
+}
+
 /// Determine which expert indices are needed for a batch of tokens.
 /// Used for prefetching: we can precompute gating for all tokens in a batch,
 /// then only load the union of needed experts from SSD.
@@ -300,6 +356,72 @@ mod tests {
                 m,
                 s
             );
+        }
+    }
+
+    #[test]
+    fn test_moe_forward_gpu_fallback() {
+        // Without GPU, should produce same result as CPU path
+        let n_embd = 4;
+        let n_ff = 8;
+        let n_experts = 4;
+        let config = MoeConfig::new(n_experts, 2);
+
+        let x = vec![1.0f32; n_embd];
+        let gate_weights = vec![0.1f32; n_experts * n_embd];
+        let w_gate_data = vec![0.1f32; n_ff * n_embd];
+        let w_up_data = vec![0.1f32; n_ff * n_embd];
+        let w_down_data = vec![0.1f32; n_embd * n_ff];
+        let experts: Vec<ExpertWeights> = (0..n_experts)
+            .map(|_| ExpertWeights {
+                w_gate: &w_gate_data,
+                w_up: &w_up_data,
+                w_down: &w_down_data,
+            })
+            .collect();
+
+        let cpu_out = moe_forward(&x, &gate_weights, &experts, &config, n_embd);
+        let gpu_out = moe_forward_gpu(&x, &gate_weights, &experts, &config, n_embd, None);
+        assert_eq!(cpu_out, gpu_out);
+    }
+
+    #[test]
+    fn test_moe_forward_gpu_with_metal() {
+        use crate::metal::gpu::MetalGpu;
+        let gpu = MetalGpu::new();
+        let n_embd = 64;
+        let n_ff = 2048; // meets MIN_GPU_MOE_ELEMENTS
+        let n_experts = 8;
+        let config = MoeConfig::new(n_experts, 2);
+
+        let x: Vec<f32> = (0..n_embd).map(|i| (i as f32) * 0.01).collect();
+        let gate_weights: Vec<f32> = (0..n_experts * n_embd)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.01)
+            .collect();
+        let w_gate_data: Vec<f32> = (0..n_ff * n_embd)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.001)
+            .collect();
+        let w_up_data: Vec<f32> = (0..n_ff * n_embd)
+            .map(|i| ((i % 13) as f32 - 6.0) * 0.001)
+            .collect();
+        let w_down_data: Vec<f32> = (0..n_embd * n_ff)
+            .map(|i| ((i % 11) as f32 - 5.0) * 0.001)
+            .collect();
+        let experts: Vec<ExpertWeights> = (0..n_experts)
+            .map(|_| ExpertWeights {
+                w_gate: &w_gate_data,
+                w_up: &w_up_data,
+                w_down: &w_down_data,
+            })
+            .collect();
+
+        let cpu_out = moe_forward(&x, &gate_weights, &experts, &config, n_embd);
+        let gpu_out = moe_forward_gpu(&x, &gate_weights, &experts, &config, n_embd, gpu.as_ref());
+
+        assert_eq!(cpu_out.len(), gpu_out.len());
+        for (c, g) in cpu_out.iter().zip(gpu_out.iter()) {
+            let diff = (c - g).abs();
+            assert!(diff < 0.05, "CPU={c} GPU={g} diff={diff} exceeds tolerance");
         }
     }
 
