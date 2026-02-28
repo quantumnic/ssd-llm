@@ -1869,6 +1869,57 @@ kernel void fused_rmsnorm_linear_f32(
     logits[tid] = sum * inv_rms;
 }
 
+// ============================================================
+// Fused Post-Attention Residual + FFN RMSNorm
+//
+// After attention, the transformer does:
+//   hidden_state[i] += attn_output[i]          (residual connection)
+//   ffn_input[i] = rmsnorm(hidden_state[i])    (normalize for FFN)
+//
+// This kernel fuses all three operations (residual add, sum-of-squares,
+// normalize+weight) into two phases, eliminating the hidden_state clone
+// and saving two full memory passes per transformer layer.
+//
+// Phase 1: hidden[i] += attn[i], accumulate partial sumsq → partial_sums
+// Phase 2: ffn_out[i] = hidden[i] * inv_rms * norm_weight[i]
+//          (hidden_state is NOT modified in phase 2, preserving the
+//           un-normalized residual for the next residual connection)
+// ============================================================
+
+/// Phase 1: residual add + partial sum-of-squares
+kernel void fused_post_attn_norm_sumsq(
+    device float* hidden         [[buffer(0)]],  // [n_embd] in-place: += attn
+    device const float* attn     [[buffer(1)]],  // [n_embd] attention output
+    device float* partial_sums   [[buffer(2)]],  // [threads] partial sumsq
+    constant uint& n             [[buffer(3)]],  // n_embd
+    uint tid                     [[thread_position_in_grid]],
+    uint tcount                  [[threads_per_grid]]
+) {
+    float sum = 0.0;
+    for (uint i = tid; i < n; i += tcount) {
+        float val = hidden[i] + attn[i];
+        hidden[i] = val;
+        sum += val * val;
+    }
+    partial_sums[tid] = sum;
+}
+
+/// Phase 2: produce normalized FFN input (hidden_state unchanged)
+kernel void fused_post_attn_norm_apply(
+    device const float* hidden   [[buffer(0)]],  // [n_embd] (read-only)
+    device const float* weight   [[buffer(1)]],  // [n_embd] norm weights
+    device float* ffn_out        [[buffer(2)]],  // [n_embd] normalized output
+    device const float* rms_inv  [[buffer(3)]],  // [1] precomputed 1/rms
+    constant uint& n             [[buffer(4)]],  // n_embd
+    uint tid                     [[thread_position_in_grid]],
+    uint tcount                  [[threads_per_grid]]
+) {
+    float inv = rms_inv[0];
+    for (uint i = tid; i < n; i += tcount) {
+        ffn_out[i] = hidden[i] * inv * weight[i];
+    }
+}
+
 /// Compute inverse RMS for fused_rmsnorm_linear (single-thread utility kernel)
 kernel void compute_inv_rms(
     device const float* x     [[buffer(0)]],   // [n_embd]

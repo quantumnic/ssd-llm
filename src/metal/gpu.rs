@@ -61,6 +61,8 @@ struct GpuPipelines {
     moe_expert_swiglu: ComputePipelineState,
     fused_rmsnorm_linear_f32: ComputePipelineState,
     compute_inv_rms: ComputePipelineState,
+    fused_post_attn_norm_sumsq: ComputePipelineState,
+    fused_post_attn_norm_apply: ComputePipelineState,
 }
 
 unsafe impl Send for MetalGpu {}
@@ -146,6 +148,8 @@ impl MetalGpu {
             moe_expert_swiglu: make_pipeline("moe_expert_swiglu")?,
             fused_rmsnorm_linear_f32: make_pipeline("fused_rmsnorm_linear_f32")?,
             compute_inv_rms: make_pipeline("compute_inv_rms")?,
+            fused_post_attn_norm_sumsq: make_pipeline("fused_post_attn_norm_sumsq")?,
+            fused_post_attn_norm_apply: make_pipeline("fused_post_attn_norm_apply")?,
         })
     }
 
@@ -1085,6 +1089,84 @@ impl MetalGpu {
         let k = self.read_buffer::<f32>(&k_buf, kv_dim);
         let v = self.read_buffer::<f32>(&v_buf, kv_dim);
         (q, k, v)
+    }
+
+    /// Fused post-attention residual add + FFN RMSNorm.
+    ///
+    /// Performs: hidden[i] += attn[i], then ffn_out = rmsnorm(hidden) * weight
+    /// in two GPU dispatches within a single logical operation.
+    /// Eliminates the hidden_state clone + separate RMSNorm dispatch.
+    /// Returns the normalized FFN input; hidden_state is updated in-place.
+    #[cfg(target_os = "macos")]
+    pub fn fused_post_attn_norm_f32(
+        &self,
+        hidden: &mut [f32],
+        attn_output: &[f32],
+        norm_weight: &[f32],
+        eps: f32,
+    ) -> Vec<f32> {
+        let n = hidden.len();
+        debug_assert_eq!(n, attn_output.len());
+        debug_assert_eq!(n, norm_weight.len());
+
+        // Phase 1: residual add + partial sum-of-squares
+        let hidden_buf = self.create_buffer_with_data(hidden);
+        let attn_buf = self.create_buffer_with_data(attn_output);
+        let n_threads = 256usize;
+        let partial_buf = self.create_buffer::<f32>(n_threads);
+        let n_buf = self.create_buffer_with_data(&[n as u32]);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.fused_post_attn_norm_sumsq);
+        encoder.set_buffer(0, Some(&hidden_buf), 0);
+        encoder.set_buffer(1, Some(&attn_buf), 0);
+        encoder.set_buffer(2, Some(&partial_buf), 0);
+        encoder.set_buffer(3, Some(&n_buf), 0);
+        let tg = MTLSize::new(n_threads as u64, 1, 1);
+        encoder.dispatch_threads(tg, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        // CPU reduction of partial sums
+        let partials = self.read_buffer::<f32>(&partial_buf, n_threads);
+        let sum_sq: f32 = partials.iter().sum();
+        let inv_rms = 1.0 / (sum_sq / n as f32 + eps).sqrt();
+
+        // Phase 2: produce normalized FFN input (hidden unchanged)
+        let weight_buf = self.create_buffer_with_data(norm_weight);
+        let inv_rms_buf = self.create_buffer_with_data(&[inv_rms]);
+        let ffn_buf = self.create_buffer::<f32>(n);
+
+        let cmd = self.queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.pipelines.fused_post_attn_norm_apply);
+        encoder.set_buffer(0, Some(&hidden_buf), 0);
+        encoder.set_buffer(1, Some(&weight_buf), 0);
+        encoder.set_buffer(2, Some(&ffn_buf), 0);
+        encoder.set_buffer(3, Some(&inv_rms_buf), 0);
+        encoder.set_buffer(4, Some(&n_buf), 0);
+        let threads = MTLSize::new(n as u64, 1, 1);
+        let tg = MTLSize::new(
+            (self
+                .pipelines
+                .fused_post_attn_norm_apply
+                .max_total_threads_per_threadgroup())
+            .min(n as u64),
+            1,
+            1,
+        );
+        encoder.dispatch_threads(threads, tg);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        // Read back updated hidden state and FFN input
+        let updated_hidden = self.read_buffer::<f32>(&hidden_buf, n);
+        hidden.copy_from_slice(&updated_hidden);
+
+        self.read_buffer::<f32>(&ffn_buf, n)
     }
 
     /// Fused RMSNorm + Output Projection: logits = W_out × rmsnorm(hidden_state)

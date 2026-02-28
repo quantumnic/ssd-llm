@@ -83,6 +83,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **📌 Adaptive Layer Pinning** — Automatic hot-layer detection: tracks per-layer access frequency with exponential decay, auto-pins the N hottest layers in RAM (e.g., embeddings, early attention), configurable via `--adaptive-pin N`
 - **📏 Criterion Benchmarks** — Reproducible micro-benchmarks for core operations (softmax, matvec, RoPE, RMSNorm)
 - **⚡ Fused RMSNorm + Output Projection** — Single GPU dispatch combines final layer normalization with vocabulary projection, eliminating intermediate buffer allocation and one full memory pass over the hidden state per generated token
+- **🔗 Fused Post-Attention Residual + FFN Norm** — Single logical operation combines attention residual connection with FFN input normalization, eliminating per-layer hidden state clones and 2 memory passes per transformer layer
 
 ## Installation
 

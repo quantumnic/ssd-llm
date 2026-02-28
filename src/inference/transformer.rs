@@ -194,28 +194,49 @@ pub fn batch_prefill_lora(
                     metal_compute.as_ref(),
                     DEFAULT_ROPE_THETA,
                 );
-                // Residual connection
-                for (i, hs) in hidden_state.iter_mut().enumerate() {
-                    *hs += attn_output.get(i).copied().unwrap_or(0.0);
-                }
-            }
+                // Fused: residual add + FFN RMSNorm
+                let ffn_norm_w = find_tensor_in_layer(cached, "ffn_norm.weight", layer_idx);
+                if let Some(norm_w) = ffn_norm_w {
+                    let ffn_input = if let Some(ref mc) = metal_compute {
+                        mc.fused_post_attn_norm_f32(hidden_state, &attn_output, norm_w, 1e-5)
+                    } else {
+                        crate::metal::compute::fused_post_attn_norm_f32_cpu(
+                            hidden_state,
+                            &attn_output,
+                            norm_w,
+                            1e-5,
+                        )
+                    };
 
-            let mut ffn_input = hidden_state.clone();
-            if let Some(norm_w) = find_tensor_in_layer(cached, "ffn_norm.weight", layer_idx) {
-                rms_norm(&mut ffn_input, norm_w);
-            }
-
-            // 3. Feed-Forward Network (dense or MoE) — GPU-accelerated
-            if let Some(ffn_output) = run_ffn_or_moe_gpu(
-                &ffn_input,
-                cached,
-                layer_idx,
-                moe_config.as_ref(),
-                n_embd,
-                metal_gpu.as_ref(),
-            ) {
-                for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
-                    *h += f;
+                    if let Some(ffn_output) = run_ffn_or_moe_gpu(
+                        &ffn_input,
+                        cached,
+                        layer_idx,
+                        moe_config.as_ref(),
+                        n_embd,
+                        metal_gpu.as_ref(),
+                    ) {
+                        for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
+                            *h += f;
+                        }
+                    }
+                } else {
+                    for (i, hs) in hidden_state.iter_mut().enumerate() {
+                        *hs += attn_output.get(i).copied().unwrap_or(0.0);
+                    }
+                    let ffn_input = hidden_state.clone();
+                    if let Some(ffn_output) = run_ffn_or_moe_gpu(
+                        &ffn_input,
+                        cached,
+                        layer_idx,
+                        moe_config.as_ref(),
+                        n_embd,
+                        metal_gpu.as_ref(),
+                    ) {
+                        for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
+                            *h += f;
+                        }
+                    }
                 }
             }
         }
@@ -323,30 +344,51 @@ fn forward_pass(
                 metal_compute.as_ref(),
                 DEFAULT_ROPE_THETA,
             );
-            // Residual connection
-            for (i, hs) in hidden_state.iter_mut().enumerate() {
-                *hs += attn_output.get(i).copied().unwrap_or(0.0);
-            }
-        }
+            // Fused: residual add + FFN RMSNorm (eliminates clone + separate norm)
+            let ffn_norm_w = find_tensor_in_layer(cached, "ffn_norm.weight", layer_idx);
+            if let Some(norm_w) = ffn_norm_w {
+                let ffn_input = if let Some(ref mc) = metal_compute {
+                    mc.fused_post_attn_norm_f32(hidden_state, &attn_output, norm_w, 1e-5)
+                } else {
+                    crate::metal::compute::fused_post_attn_norm_f32_cpu(
+                        hidden_state,
+                        &attn_output,
+                        norm_w,
+                        1e-5,
+                    )
+                };
 
-        // 3. RMS Norm (pre-FFN)
-        let mut ffn_input = hidden_state.clone();
-        if let Some(norm_w) = find_tensor_in_layer(cached, "ffn_norm.weight", layer_idx) {
-            rms_norm(&mut ffn_input, norm_w);
-        }
-
-        // 4. Feed-Forward Network (dense or MoE) — GPU-accelerated when available
-        if let Some(ffn_output) = run_ffn_or_moe_gpu(
-            &ffn_input,
-            cached,
-            layer_idx,
-            moe_config.as_ref(),
-            n_embd,
-            metal_gpu.as_ref(),
-        ) {
-            // Residual connection
-            for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
-                *h += f;
+                // Feed-Forward Network (dense or MoE) — GPU-accelerated
+                if let Some(ffn_output) = run_ffn_or_moe_gpu(
+                    &ffn_input,
+                    cached,
+                    layer_idx,
+                    moe_config.as_ref(),
+                    n_embd,
+                    metal_gpu.as_ref(),
+                ) {
+                    for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
+                        *h += f;
+                    }
+                }
+            } else {
+                // No norm weight: just residual add + run FFN without norm
+                for (i, hs) in hidden_state.iter_mut().enumerate() {
+                    *hs += attn_output.get(i).copied().unwrap_or(0.0);
+                }
+                let ffn_input = hidden_state.clone();
+                if let Some(ffn_output) = run_ffn_or_moe_gpu(
+                    &ffn_input,
+                    cached,
+                    layer_idx,
+                    moe_config.as_ref(),
+                    n_embd,
+                    metal_gpu.as_ref(),
+                ) {
+                    for (h, f) in hidden_state.iter_mut().zip(ffn_output.iter()) {
+                        *h += f;
+                    }
+                }
             }
         }
 

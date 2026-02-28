@@ -320,6 +320,28 @@ impl MetalCompute {
         )
     }
 
+    /// Fused post-attention residual add + FFN RMSNorm.
+    ///
+    /// Performs `hidden += attn_output` then returns `rmsnorm(hidden, weight)`.
+    /// GPU: two Metal dispatches. CPU: in-place add + norm + clone.
+    /// Eliminates the hidden_state clone and a separate RMSNorm call per layer.
+    pub fn fused_post_attn_norm_f32(
+        &self,
+        hidden: &mut [f32],
+        attn_output: &[f32],
+        norm_weight: &[f32],
+        eps: f32,
+    ) -> Vec<f32> {
+        #[cfg(target_os = "macos")]
+        if let Some(ref gpu) = self.gpu {
+            if gpu.should_dispatch(hidden.len()) {
+                return gpu.fused_post_attn_norm_f32(hidden, attn_output, norm_weight, eps);
+            }
+        }
+        // CPU fallback
+        fused_post_attn_norm_f32_cpu(hidden, attn_output, norm_weight, eps)
+    }
+
     /// Fused RMSNorm + Output Projection: logits = W_out × rmsnorm(hidden_state)
     /// GPU path computes inv_rms then fused norm+matmul in two back-to-back dispatches.
     /// CPU fallback normalizes in-place then does standard matvec.
@@ -508,6 +530,30 @@ pub fn fused_qkv_rope_f32_cpu(
 
 /// CPU fallback for fused RMSNorm + output projection.
 /// Normalizes hidden state, then computes logits via matvec.
+/// CPU fallback for fused post-attention residual add + FFN RMSNorm.
+///
+/// Performs: hidden[i] += attn[i], then returns rmsnorm(hidden) * weight.
+pub fn fused_post_attn_norm_f32_cpu(
+    hidden: &mut [f32],
+    attn_output: &[f32],
+    norm_weight: &[f32],
+    eps: f32,
+) -> Vec<f32> {
+    let n = hidden.len();
+    // Residual add
+    for i in 0..n {
+        hidden[i] += attn_output[i];
+    }
+    // RMSNorm → output
+    let sum_sq: f32 = hidden.iter().map(|x| x * x).sum();
+    let inv_rms = 1.0 / (sum_sq / n as f32 + eps).sqrt();
+    hidden
+        .iter()
+        .zip(norm_weight.iter())
+        .map(|(&h, &w)| h * inv_rms * w)
+        .collect()
+}
+
 pub fn fused_rmsnorm_linear_f32_cpu(
     x: &[f32],
     norm_weight: &[f32],
@@ -3404,6 +3450,159 @@ mod tests {
                 "logit {i}: fused={} separate={}",
                 fused[i],
                 separate[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_fused_post_attn_norm_cpu_basic() {
+        let n = 64;
+        let mut hidden: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
+        let attn: Vec<f32> = (0..n).map(|i| (n - i) as f32 * 0.05).collect();
+        let weight: Vec<f32> = (0..n).map(|i| 0.8 + (i % 3) as f32 * 0.1).collect();
+
+        let ffn_input = fused_post_attn_norm_f32_cpu(&mut hidden, &attn, &weight, 1e-5);
+
+        // Verify residual was applied
+        for i in 0..n {
+            let expected = i as f32 * 0.1 + (n - i) as f32 * 0.05;
+            assert!(
+                (hidden[i] - expected).abs() < 1e-6,
+                "hidden[{i}]: got={} expected={}",
+                hidden[i],
+                expected
+            );
+        }
+
+        // Verify normalization
+        assert_eq!(ffn_input.len(), n);
+        let sum_sq: f32 = hidden.iter().map(|x| x * x).sum();
+        let inv_rms = 1.0 / (sum_sq / n as f32 + 1e-5).sqrt();
+        for i in 0..n {
+            let expected = hidden[i] * inv_rms * weight[i];
+            assert!(
+                (ffn_input[i] - expected).abs() < 1e-5,
+                "ffn[{i}]: got={} expected={}",
+                ffn_input[i],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_fused_post_attn_norm_cpu_matches_separate() {
+        let n = 128;
+        let hidden_orig: Vec<f32> = (0..n)
+            .map(|i| ((i * 7 + 3) % 13) as f32 * 0.1 - 0.5)
+            .collect();
+        let attn: Vec<f32> = (0..n)
+            .map(|i| ((i * 11 + 5) % 17) as f32 * 0.08 - 0.3)
+            .collect();
+        let weight: Vec<f32> = (0..n).map(|i| 0.5 + (i % 5) as f32 * 0.2).collect();
+
+        // Fused path
+        let mut hidden_fused = hidden_orig.clone();
+        let ffn_fused = fused_post_attn_norm_f32_cpu(&mut hidden_fused, &attn, &weight, 1e-5);
+
+        // Separate path
+        let mut hidden_sep = hidden_orig.clone();
+        for i in 0..n {
+            hidden_sep[i] += attn[i];
+        }
+        let mut ffn_sep = hidden_sep.clone();
+        rmsnorm_f32_fast(&mut ffn_sep, &weight, 1e-5);
+
+        for i in 0..n {
+            assert!(
+                (hidden_fused[i] - hidden_sep[i]).abs() < 1e-6,
+                "hidden[{i}]: fused={} separate={}",
+                hidden_fused[i],
+                hidden_sep[i]
+            );
+            assert!(
+                (ffn_fused[i] - ffn_sep[i]).abs() < 1e-5,
+                "ffn[{i}]: fused={} separate={}",
+                ffn_fused[i],
+                ffn_sep[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_fused_post_attn_norm_gpu_matches_cpu() {
+        let gpu = match crate::metal::gpu::MetalGpu::new() {
+            Some(g) => g,
+            None => return,
+        };
+
+        let n = 256;
+        let hidden_orig: Vec<f32> = (0..n)
+            .map(|i| ((i * 7 + 3) % 13) as f32 * 0.1 - 0.5)
+            .collect();
+        let attn: Vec<f32> = (0..n)
+            .map(|i| ((i * 11 + 5) % 17) as f32 * 0.08 - 0.3)
+            .collect();
+        let weight: Vec<f32> = (0..n).map(|i| 0.5 + (i % 5) as f32 * 0.2).collect();
+
+        // CPU
+        let mut hidden_cpu = hidden_orig.clone();
+        let ffn_cpu = fused_post_attn_norm_f32_cpu(&mut hidden_cpu, &attn, &weight, 1e-5);
+
+        // GPU
+        let mut hidden_gpu = hidden_orig.clone();
+        let ffn_gpu = gpu.fused_post_attn_norm_f32(&mut hidden_gpu, &attn, &weight, 1e-5);
+
+        for i in 0..n {
+            assert!(
+                (hidden_cpu[i] - hidden_gpu[i]).abs() < 0.01,
+                "hidden[{i}]: cpu={} gpu={}",
+                hidden_cpu[i],
+                hidden_gpu[i]
+            );
+            assert!(
+                (ffn_cpu[i] - ffn_gpu[i]).abs() < 0.01,
+                "ffn[{i}]: cpu={} gpu={}",
+                ffn_cpu[i],
+                ffn_gpu[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_fused_post_attn_norm_metal_compute() {
+        let mc = match MetalCompute::new() {
+            Some(m) => m,
+            None => return,
+        };
+        let n = 128;
+        let hidden_orig: Vec<f32> = (0..n)
+            .map(|i| ((i * 7 + 3) % 13) as f32 * 0.1 - 0.5)
+            .collect();
+        let attn: Vec<f32> = (0..n)
+            .map(|i| ((i * 11 + 5) % 17) as f32 * 0.08 - 0.3)
+            .collect();
+        let weight: Vec<f32> = (0..n).map(|i| 0.5 + (i % 5) as f32 * 0.2).collect();
+
+        // CPU reference
+        let mut hidden_cpu = hidden_orig.clone();
+        let ffn_cpu = fused_post_attn_norm_f32_cpu(&mut hidden_cpu, &attn, &weight, 1e-5);
+
+        // MetalCompute path
+        let mut hidden_mc = hidden_orig.clone();
+        let ffn_mc = mc.fused_post_attn_norm_f32(&mut hidden_mc, &attn, &weight, 1e-5);
+
+        for i in 0..n {
+            assert!(
+                (hidden_cpu[i] - hidden_mc[i]).abs() < 0.01,
+                "hidden[{i}]: cpu={} mc={}",
+                hidden_cpu[i],
+                hidden_mc[i]
+            );
+            assert!(
+                (ffn_cpu[i] - ffn_mc[i]).abs() < 0.01,
+                "ffn[{i}]: cpu={} mc={}",
+                ffn_cpu[i],
+                ffn_mc[i]
             );
         }
     }

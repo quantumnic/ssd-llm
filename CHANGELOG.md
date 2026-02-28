@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.37.0 — Fused Post-Attention Residual + FFN RMSNorm Metal Kernel (2026-02-28)
+
+### Added
+
+- **Fused Post-Attention Residual + FFN RMSNorm Metal shader**: Two new Metal kernels (`fused_post_attn_norm_sumsq` and `fused_post_attn_norm_apply`) that combine the post-attention residual connection with the FFN input normalization into a single logical operation. Phase 1 performs `hidden[i] += attn_output[i]` and accumulates partial sum-of-squares in one pass. Phase 2 produces the normalized FFN input (`ffn_out[i] = hidden[i] * inv_rms * weight[i]`) without modifying the hidden state, preserving it for the next residual connection.
+- **`MetalGpu::fused_post_attn_norm_f32()`**: GPU dispatch method executing both phases in two Metal command buffer commits with CPU reduction of partial sums between phases. Updates hidden state in-place and returns the normalized FFN input.
+- **`MetalCompute::fused_post_attn_norm_f32()`**: High-level wrapper with automatic GPU/CPU dispatch based on tensor size threshold.
+- **`fused_post_attn_norm_f32_cpu()`**: CPU reference implementation for non-macOS platforms and small tensors.
+- **Integrated into both `forward_pass()` and `batch_prefill_lora()`**: The post-attention residual add + FFN normalization now uses the fused kernel by default, with graceful fallback to the separate-pass path when FFN norm weights are absent.
+- **4 new tests** (414 → 418 total): CPU basic correctness, CPU-matches-separate verification, GPU-matches-CPU numerical agreement, MetalCompute integration — all passing.
+
+### Performance
+
+- Eliminates the `hidden_state.clone()` allocation per transformer layer per token — previously needed to create a separate FFN input buffer
+- Reduces memory passes over the hidden state from 4 (residual add read+write, clone read+write, RMSNorm read+write) to 2 (fused read+write for residual+sumsq, read-only for normalized output)
+- For an 80-layer model, this saves **160 memory passes** and **80 heap allocations** per generated token
+- Batch prefill benefits equally: every token × every layer uses the fused path
+
+### Changed
+
+- `transformer.rs`: `forward_pass()` and `batch_prefill_lora()` now use `fused_post_attn_norm_f32` for the residual+norm step
+- `gpu.rs`: Added `fused_post_attn_norm_sumsq` and `fused_post_attn_norm_apply` pipeline entries
+- `kernels.metal`: Two new Metal shader kernels
+- Cargo.toml version bumped to 1.37.0
+
+## v1.36.0 — Persistent Prompt Cache (2026-02-28)
+
+### Added
+
+- **Persistent prompt cache**: Save/load KV cache states to disk for instant system prompt reuse across server restarts, with atomic writes and budget-aware loading
+- **5 new tests** (409 → 414 total)
+
 ## v1.35.0 — GPU-Accelerated Transformer Forward Pass (2026-02-25)
 
 ### Added
