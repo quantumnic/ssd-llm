@@ -41,7 +41,7 @@ Instead of loading the entire model, **ssd-llm** streams transformer layers on-d
 - **🎯 Speculative Decoding** — Use a small draft model to propose tokens, verified by the target model for 2-3x speedup
 - **📦 Batch Prefill** — Layer-major prompt processing: each layer loaded once for all prompt tokens, minimizing SSD reads
 - **🎛️ Adaptive Draft Length** — Dynamically adjusts speculation depth K based on rolling acceptance rate
-- **📦 Prompt Prefix Caching** — Reuse KV cache states for repeated prompt prefixes (system prompts, templates)
+- **📦 Prompt Prefix Caching** — Reuse KV cache states for repeated prompt prefixes (system prompts, templates), with persistent disk storage for instant warm-up across server restarts
 - **🔄 Continuous Batching** — Handle multiple concurrent requests, share layer loads across sequences
 - **🔀 Tensor Parallelism** — Split matmul across multiple threads for better GPU/CPU utilization
 - **🪟 Sliding Window Attention** — Limit attention to recent W tokens with optional sink tokens for bounded memory

@@ -772,6 +772,11 @@ fn main() -> Result<()> {
                 paged_block_size,
                 swap_quantize,
                 adaptive_pin,
+                prompt_cache_dir: if prompt_cache {
+                    Some(std::path::PathBuf::from(".ssd-llm-cache"))
+                } else {
+                    None
+                },
             });
 
             if adaptive_pin > 0 {

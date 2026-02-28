@@ -45,6 +45,8 @@ pub struct ServerConfig {
     pub paged_block_size: usize,
     pub swap_quantize: bool,
     pub adaptive_pin: usize,
+    /// Directory for persistent prompt cache files (empty = disabled)
+    pub prompt_cache_dir: Option<PathBuf>,
 }
 
 /// Model context shared across requests
@@ -117,6 +119,25 @@ impl ApiServer {
             adaptive_pinner,
         }));
 
+        // Persistent prompt cache: load from disk on startup
+        let prompt_cache_path = self.config.prompt_cache_dir.as_ref().map(|dir| {
+            let _ = std::fs::create_dir_all(dir);
+            dir.join("prompt_cache.bin")
+        });
+        let prompt_cache_state = if self.config.prompt_cache {
+            let mut pc = crate::inference::prompt_cache::PromptCache::new(256 * 1024 * 1024);
+            if let Some(ref path) = prompt_cache_path {
+                match pc.load_from_disk(path) {
+                    Ok(n) if n > 0 => info!("Restored {} prompt cache entries from disk", n),
+                    Ok(_) => {}
+                    Err(e) => warn!("Failed to load prompt cache from disk: {}", e),
+                }
+            }
+            Some(Arc::new(Mutex::new(pc)))
+        } else {
+            None
+        };
+
         // Graceful shutdown via SIGINT/SIGTERM
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = Arc::clone(&shutdown);
@@ -144,6 +165,16 @@ impl ApiServer {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(e) => error!("Accept error: {}", e),
+            }
+        }
+
+        // Persistent prompt cache: save to disk on shutdown
+        if let (Some(ref pc), Some(ref path)) = (&prompt_cache_state, &prompt_cache_path) {
+            let pc = pc.lock().unwrap();
+            match pc.save_to_disk(path) {
+                Ok(n) if n > 0 => info!("Saved {} prompt cache entries to disk", n),
+                Ok(_) => {}
+                Err(e) => warn!("Failed to save prompt cache to disk: {}", e),
             }
         }
 
