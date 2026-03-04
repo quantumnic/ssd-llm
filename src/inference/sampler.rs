@@ -182,6 +182,12 @@ impl Sampler {
         }
     }
 
+        /// Set a deterministic seed for reproducible sampling
+    pub fn with_seed(self, seed: u64) -> Self {
+        self.rng_state.set(seed ^ 0x517cc1b727220a95);
+        self
+    }
+
     /// Apply repetition, frequency, and presence penalties to logits based on prior tokens
     pub fn apply_penalties(&self, logits: &mut [f32], previous_tokens: &[u32]) {
         if (self.repetition_penalty - 1.0).abs() < 1e-6
@@ -761,5 +767,58 @@ mod tests {
         let original = logits.clone();
         sampler.apply_penalties(&mut logits, &[0, 1, 2]);
         assert_eq!(logits, original);
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn test_with_seed_deterministic() {
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+
+        let s1 = Sampler::new(1.0, 40, 0.9).with_seed(42);
+        let s2 = Sampler::new(1.0, 40, 0.9).with_seed(42);
+
+        let tokens1: Vec<u32> = (0..20).map(|_| s1.sample(&logits)).collect();
+        let tokens2: Vec<u32> = (0..20).map(|_| s2.sample(&logits)).collect();
+        assert_eq!(tokens1, tokens2, "Same seed should produce identical sequences");
+    }
+
+    #[test]
+    fn test_different_seeds_differ() {
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+
+        let s1 = Sampler::new(1.0, 40, 0.9).with_seed(42);
+        let s2 = Sampler::new(1.0, 40, 0.9).with_seed(99);
+
+        let tokens1: Vec<u32> = (0..20).map(|_| s1.sample(&logits)).collect();
+        let tokens2: Vec<u32> = (0..20).map(|_| s2.sample(&logits)).collect();
+        assert_ne!(tokens1, tokens2, "Different seeds should produce different sequences");
+    }
+
+    #[test]
+    fn test_seed_with_mirostat() {
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+
+        let s1 = Sampler::with_mirostat(0.7, MirostatMode::V2, 5.0, 0.1).with_seed(42);
+        let s2 = Sampler::with_mirostat(0.7, MirostatMode::V2, 5.0, 0.1).with_seed(42);
+
+        let tokens1: Vec<u32> = (0..10).map(|_| s1.sample(&logits)).collect();
+        let tokens2: Vec<u32> = (0..10).map(|_| s2.sample(&logits)).collect();
+        assert_eq!(tokens1, tokens2, "Seeded Mirostat should be deterministic");
+    }
+
+    #[test]
+    fn test_seed_with_min_p() {
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+
+        let s1 = Sampler::with_min_p(0.8, 40, 0.9, 0.1, 1.0, 0.0, 0.0).with_seed(123);
+        let s2 = Sampler::with_min_p(0.8, 40, 0.9, 0.1, 1.0, 0.0, 0.0).with_seed(123);
+
+        let tokens1: Vec<u32> = (0..10).map(|_| s1.sample(&logits)).collect();
+        let tokens2: Vec<u32> = (0..10).map(|_| s2.sample(&logits)).collect();
+        assert_eq!(tokens1, tokens2, "Seeded Min-P sampling should be deterministic");
     }
 }

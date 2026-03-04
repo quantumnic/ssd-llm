@@ -116,10 +116,11 @@ impl MetricsCollector {
         let status = if model_loaded { "healthy" } else { "loading" };
 
         format!(
-            r#"{{"status":"{}","model":"{}","uptime_seconds":{},"version":"0.9.0","active_requests":{}}}"#,
+            r#"{{"status":"{}","model":"{}","uptime_seconds":{},"version":"{}","active_requests":{}}}"#,
             status,
             model_name,
             uptime_secs,
+            env!("CARGO_PKG_VERSION"),
             self.active_requests.load(Ordering::Relaxed),
         )
     }
@@ -307,7 +308,7 @@ mod tests {
         let json = m.health_json("test-model", true);
         assert!(json.contains("\"status\":\"healthy\""));
         assert!(json.contains("\"model\":\"test-model\""));
-        assert!(json.contains("\"version\":\"0.9.0\""));
+        assert!(json.contains(&format!("\"version\":\"{}\""  , env!("CARGO_PKG_VERSION"))));
     }
 
     #[test]

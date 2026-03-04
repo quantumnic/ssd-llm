@@ -39,11 +39,37 @@ pub struct InferenceConfig {
     pub mirostat_eta: f32,
     /// GBNF grammar string for constrained generation (empty = disabled)
     pub grammar: String,
+    /// Min-P filtering threshold (0.0 = disabled, 0.05–0.2 typical)
+    pub min_p: f32,
+    /// Optional seed for reproducible sampling (None = random)
+    pub seed: Option<u64>,
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            temperature: 0.7,
+            top_k: 40,
+            top_p: 0.9,
+            max_tokens: 512,
+            stop_sequences: Vec::new(),
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            tfs_z: 0.0,
+            mirostat: 0,
+            mirostat_tau: 5.0,
+            mirostat_eta: 0.1,
+            grammar: String::new(),
+            min_p: 0.0,
+            seed: None,
+        }
+    }
 }
 
 /// Build the appropriate sampler from inference configuration
 fn build_sampler(config: &InferenceConfig) -> Sampler {
-    match config.mirostat {
+    let sampler = match config.mirostat {
         1 => Sampler::with_mirostat(
             config.temperature,
             MirostatMode::V1,
@@ -72,13 +98,18 @@ fn build_sampler(config: &InferenceConfig) -> Sampler {
                     config.temperature,
                     config.top_k,
                     config.top_p,
-                    0.0,
+                    config.min_p,
                     config.repetition_penalty,
                     config.frequency_penalty,
                     config.presence_penalty,
                 )
             }
         }
+    };
+    if let Some(seed) = config.seed {
+        sampler.with_seed(seed)
+    } else {
+        sampler
     }
 }
 
@@ -1078,4 +1109,75 @@ pub fn generate_streaming<'a>(
         remaining: config.max_tokens,
         done: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inference_config_default() {
+        let config = InferenceConfig::default();
+        assert!((config.temperature - 0.7).abs() < 1e-6);
+        assert_eq!(config.top_k, 40);
+        assert!((config.top_p - 0.9).abs() < 1e-6);
+        assert_eq!(config.max_tokens, 512);
+        assert!((config.min_p - 0.0).abs() < 1e-6);
+        assert!(config.seed.is_none());
+        assert!((config.repetition_penalty - 1.0).abs() < 1e-6);
+        assert_eq!(config.mirostat, 0);
+    }
+
+    #[test]
+    fn test_build_sampler_with_min_p() {
+        let config = InferenceConfig {
+            min_p: 0.1,
+            ..Default::default()
+        };
+        // Should not panic
+        let sampler = build_sampler(&config);
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let token = sampler.sample(&logits);
+        assert!((token as usize) < logits.len());
+    }
+
+    #[test]
+    fn test_build_sampler_with_seed_deterministic() {
+        let config = InferenceConfig {
+            seed: Some(42),
+            temperature: 1.0,
+            ..Default::default()
+        };
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+
+        let s1 = build_sampler(&config);
+        let s2 = build_sampler(&config);
+        let t1: Vec<u32> = (0..10).map(|_| s1.sample(&logits)).collect();
+        let t2: Vec<u32> = (0..10).map(|_| s2.sample(&logits)).collect();
+        assert_eq!(t1, t2, "Seeded build_sampler should be deterministic");
+    }
+
+    #[test]
+    fn test_build_sampler_mirostat_mode() {
+        let config = InferenceConfig {
+            mirostat: 2,
+            ..Default::default()
+        };
+        let sampler = build_sampler(&config);
+        let logits = vec![1.0, 2.0, 3.0, 4.0];
+        let token = sampler.sample(&logits);
+        assert!((token as usize) < logits.len());
+    }
+
+    #[test]
+    fn test_build_sampler_tfs() {
+        let config = InferenceConfig {
+            tfs_z: 0.95,
+            ..Default::default()
+        };
+        let sampler = build_sampler(&config);
+        let logits = vec![1.0, 2.0, 3.0, 4.0];
+        let token = sampler.sample(&logits);
+        assert!((token as usize) < logits.len());
+    }
 }
