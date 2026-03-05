@@ -37,6 +37,12 @@ pub struct MetricsCollector {
     latencies_ms: Mutex<Vec<f64>>,
 }
 
+
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl MetricsCollector {
     pub fn new() -> Self {
         Self {
@@ -268,6 +274,26 @@ impl MetricsCollector {
         )
     }
 
+    /// Reset all counters (useful for metrics rotation in long-running deployments)
+    pub fn reset(&self) {
+        self.total_requests.store(0, Ordering::Relaxed);
+        self.active_requests.store(0, Ordering::Relaxed);
+        self.error_count.store(0, Ordering::Relaxed);
+        self.total_prompt_tokens.store(0, Ordering::Relaxed);
+        self.total_generated_tokens.store(0, Ordering::Relaxed);
+        self.total_inference_time_us.store(0, Ordering::Relaxed);
+        self.cache_hits.store(0, Ordering::Relaxed);
+        self.cache_misses.store(0, Ordering::Relaxed);
+        self.cache_evictions.store(0, Ordering::Relaxed);
+        self.ssd_bytes_read.store(0, Ordering::Relaxed);
+        self.memory_pressure_level.store(0, Ordering::Relaxed);
+        self.memory_available_bytes.store(0, Ordering::Relaxed);
+        self.memory_total_bytes.store(0, Ordering::Relaxed);
+        if let Ok(mut latencies) = self.latencies_ms.lock() {
+            latencies.clear();
+        }
+    }
+
     fn compute_percentiles(&self) -> (f64, f64, f64) {
         if let Ok(mut latencies) = self.latencies_ms.lock() {
             if latencies.is_empty() {
@@ -394,5 +420,38 @@ mod tests {
         assert_eq!(m.cache_hits.load(Ordering::Relaxed), 10);
         assert_eq!(m.cache_misses.load(Ordering::Relaxed), 5);
         assert_eq!(m.cache_evictions.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let m = MetricsCollector::default();
+        assert_eq!(m.total_requests.load(Ordering::Relaxed), 0);
+        assert_eq!(m.active_requests.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_reset() {
+        let m = MetricsCollector::new();
+        m.record_request_start();
+        m.record_request_end(50.0, 10, 20);
+        m.record_cache_hit();
+        m.record_ssd_read(1000);
+        m.record_error();
+        // Start a new request so active goes to 1, then reset
+        m.record_request_start();
+
+        m.reset();
+
+        assert_eq!(m.total_requests.load(Ordering::Relaxed), 0);
+        assert_eq!(m.active_requests.load(Ordering::Relaxed), 0);
+        assert_eq!(m.error_count.load(Ordering::Relaxed), 0);
+        assert_eq!(m.total_prompt_tokens.load(Ordering::Relaxed), 0);
+        assert_eq!(m.total_generated_tokens.load(Ordering::Relaxed), 0);
+        assert_eq!(m.cache_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(m.ssd_bytes_read.load(Ordering::Relaxed), 0);
+        let (p50, p95, p99) = m.compute_percentiles();
+        assert_eq!(p50, 0.0);
+        assert_eq!(p95, 0.0);
+        assert_eq!(p99, 0.0);
     }
 }
