@@ -370,3 +370,174 @@ port = 8080
         assert_eq!(map.get("section.num").unwrap(), "42");
     }
 }
+
+impl Config {
+    /// Validate configuration values, returning all errors found
+    pub fn validate(&self) -> Result<()> {
+        let mut errors = Vec::new();
+
+        // Server validation
+        if self.server.port == 0 {
+            errors.push("server.port must be > 0".to_string());
+        }
+        if self.server.max_batch == 0 {
+            errors.push("server.max_batch must be > 0".to_string());
+        }
+        if self.server.host.is_empty() {
+            errors.push("server.host must not be empty".to_string());
+        }
+
+        // Inference validation
+        if self.inference.temperature < 0.0 {
+            errors.push(format!(
+                "inference.temperature must be >= 0.0, got {}",
+                self.inference.temperature
+            ));
+        }
+        if self.inference.top_p <= 0.0 || self.inference.top_p > 1.0 {
+            errors.push(format!(
+                "inference.top_p must be in (0.0, 1.0], got {}",
+                self.inference.top_p
+            ));
+        }
+        if self.inference.top_k == 0 {
+            errors.push("inference.top_k must be > 0".to_string());
+        }
+        if self.inference.max_tokens == 0 {
+            errors.push("inference.max_tokens must be > 0".to_string());
+        }
+        if self.inference.tfs_z < 0.0 || self.inference.tfs_z > 1.0 {
+            errors.push(format!(
+                "inference.tfs_z must be in [0.0, 1.0], got {}",
+                self.inference.tfs_z
+            ));
+        }
+        if self.inference.mirostat > 2 {
+            errors.push(format!(
+                "inference.mirostat must be 0, 1, or 2, got {}",
+                self.inference.mirostat
+            ));
+        }
+        if self.inference.mirostat_tau <= 0.0 {
+            errors.push(format!(
+                "inference.mirostat_tau must be > 0.0, got {}",
+                self.inference.mirostat_tau
+            ));
+        }
+        if self.inference.mirostat_eta <= 0.0 {
+            errors.push(format!(
+                "inference.mirostat_eta must be > 0.0, got {}",
+                self.inference.mirostat_eta
+            ));
+        }
+
+        // Memory budget validation
+        if !self.model.memory_budget.ends_with('G')
+            && !self.model.memory_budget.ends_with('M')
+            && !self.model.memory_budget.ends_with('K')
+        {
+            errors.push(format!(
+                "model.memory_budget must end with G, M, or K, got '{}'",
+                self.model.memory_budget
+            ));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "Configuration validation failed:\n  - {}",
+                errors.join("\n  - ")
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_default_config() {
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_bad_temperature() {
+        let mut config = Config::default();
+        config.inference.temperature = -0.5;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("temperature"));
+    }
+
+    #[test]
+    fn test_validate_bad_top_p() {
+        let mut config = Config::default();
+        config.inference.top_p = 1.5;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("top_p"));
+    }
+
+    #[test]
+    fn test_validate_zero_top_p() {
+        let mut config = Config::default();
+        config.inference.top_p = 0.0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("top_p"));
+    }
+
+    #[test]
+    fn test_validate_bad_memory_budget() {
+        let mut config = Config::default();
+        config.model.memory_budget = "8".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("memory_budget"));
+    }
+
+    #[test]
+    fn test_validate_bad_mirostat() {
+        let mut config = Config::default();
+        config.inference.mirostat = 5;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("mirostat"));
+    }
+
+    #[test]
+    fn test_validate_multiple_errors() {
+        let mut config = Config::default();
+        config.inference.temperature = -1.0;
+        config.inference.top_p = 2.0;
+        config.server.port = 0;
+        let err = config.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("temperature"));
+        assert!(msg.contains("top_p"));
+        assert!(msg.contains("port"));
+    }
+
+    #[test]
+    fn test_validate_empty_host() {
+        let mut config = Config::default();
+        config.server.host = String::new();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("host"));
+    }
+
+    #[test]
+    fn test_validate_tfs_z_out_of_range() {
+        let mut config = Config::default();
+        config.inference.tfs_z = 1.5;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("tfs_z"));
+    }
+
+    #[test]
+    fn test_validate_memory_budget_variants() {
+        for suffix in &["G", "M", "K"] {
+            let mut config = Config::default();
+            config.model.memory_budget = format!("16{}", suffix);
+            assert!(config.validate().is_ok(), "Should accept {}", suffix);
+        }
+    }
+}
