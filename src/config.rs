@@ -431,13 +431,10 @@ impl Config {
             ));
         }
 
-        // Memory budget validation
-        if !self.model.memory_budget.ends_with('G')
-            && !self.model.memory_budget.ends_with('M')
-            && !self.model.memory_budget.ends_with('K')
-        {
+        // Memory budget validation (suffix + numeric prefix)
+        if self.model.memory_budget_bytes().is_none() {
             errors.push(format!(
-                "model.memory_budget must end with G, M, or K, got '{}'",
+                "model.memory_budget must be a positive number followed by G, M, or K, got '{}'",
                 self.model.memory_budget
             ));
         }
@@ -539,5 +536,109 @@ mod validation_tests {
             config.model.memory_budget = format!("16{}", suffix);
             assert!(config.validate().is_ok(), "Should accept {}", suffix);
         }
+    }
+}
+
+impl ModelConfig {
+    /// Parse memory_budget string (e.g. "8G", "512M", "1024K") into bytes.
+    /// Returns `None` if the format is invalid.
+    pub fn memory_budget_bytes(&self) -> Option<usize> {
+        let s = self.memory_budget.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let (num_part, multiplier) = match s.as_bytes().last()? {
+            b'G' | b'g' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+            b'M' | b'm' => (&s[..s.len() - 1], 1024 * 1024),
+            b'K' | b'k' => (&s[..s.len() - 1], 1024),
+            _ => return None,
+        };
+        let num: usize = num_part.parse().ok()?;
+        num.checked_mul(multiplier)
+    }
+}
+
+#[cfg(test)]
+mod memory_budget_tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_budget_bytes_gigabytes() {
+        let m = ModelConfig {
+            path: None,
+            memory_budget: "8G".to_string(),
+            draft_model: None,
+        };
+        assert_eq!(m.memory_budget_bytes(), Some(8 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_memory_budget_bytes_megabytes() {
+        let m = ModelConfig {
+            path: None,
+            memory_budget: "512M".to_string(),
+            draft_model: None,
+        };
+        assert_eq!(m.memory_budget_bytes(), Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_memory_budget_bytes_kilobytes() {
+        let m = ModelConfig {
+            path: None,
+            memory_budget: "1024K".to_string(),
+            draft_model: None,
+        };
+        assert_eq!(m.memory_budget_bytes(), Some(1024 * 1024));
+    }
+
+    #[test]
+    fn test_memory_budget_bytes_lowercase() {
+        let m = ModelConfig {
+            path: None,
+            memory_budget: "4g".to_string(),
+            draft_model: None,
+        };
+        assert_eq!(m.memory_budget_bytes(), Some(4 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_memory_budget_bytes_invalid_no_suffix() {
+        let m = ModelConfig {
+            path: None,
+            memory_budget: "8".to_string(),
+            draft_model: None,
+        };
+        assert_eq!(m.memory_budget_bytes(), None);
+    }
+
+    #[test]
+    fn test_memory_budget_bytes_invalid_no_number() {
+        let m = ModelConfig {
+            path: None,
+            memory_budget: "G".to_string(),
+            draft_model: None,
+        };
+        assert_eq!(m.memory_budget_bytes(), None);
+    }
+
+    #[test]
+    fn test_memory_budget_bytes_empty() {
+        let m = ModelConfig {
+            path: None,
+            memory_budget: "".to_string(),
+            draft_model: None,
+        };
+        assert_eq!(m.memory_budget_bytes(), None);
+    }
+
+    #[test]
+    fn test_memory_budget_bytes_invalid_text() {
+        let m = ModelConfig {
+            path: None,
+            memory_budget: "lotsG".to_string(),
+            draft_model: None,
+        };
+        assert_eq!(m.memory_budget_bytes(), None);
     }
 }
