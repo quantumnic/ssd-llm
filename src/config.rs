@@ -205,6 +205,24 @@ impl Config {
                     config.inference.adaptive_pin = value.parse().unwrap_or(0);
                 }
                 "paths.model_dir" => config.paths.model_dir = PathBuf::from(value),
+                "inference.draft_ahead" => {
+                    config.inference.draft_ahead =
+                        value.parse().unwrap_or(config.inference.draft_ahead);
+                }
+                "inference.adaptive_draft" => {
+                    config.inference.adaptive_draft = value == "true";
+                }
+                "inference.tensor_parallel" => {
+                    config.inference.tensor_parallel =
+                        value.parse().unwrap_or(config.inference.tensor_parallel);
+                }
+                "inference.sink_tokens" => {
+                    config.inference.sink_tokens =
+                        value.parse().unwrap_or(config.inference.sink_tokens);
+                }
+                "inference.grammar" => {
+                    config.inference.grammar = value.clone();
+                }
                 _ => {} // ignore unknown keys
             }
         }
@@ -368,6 +386,56 @@ port = 8080
         let map = parse_toml_simple(content);
         assert_eq!(map.get("section.key").unwrap(), "value");
         assert_eq!(map.get("section.num").unwrap(), "42");
+    }
+
+    #[test]
+    fn test_parse_toml_draft_ahead() {
+        let toml = "[inference]\ndraft_ahead = 8";
+        let config = Config::parse_toml(toml).unwrap();
+        assert_eq!(config.inference.draft_ahead, 8);
+    }
+
+    #[test]
+    fn test_parse_toml_adaptive_draft() {
+        let toml = "[inference]\nadaptive_draft = true";
+        let config = Config::parse_toml(toml).unwrap();
+        assert!(config.inference.adaptive_draft);
+    }
+
+    #[test]
+    fn test_parse_toml_tensor_parallel() {
+        let toml = "[inference]\ntensor_parallel = 2";
+        let config = Config::parse_toml(toml).unwrap();
+        assert_eq!(config.inference.tensor_parallel, 2);
+    }
+
+    #[test]
+    fn test_parse_toml_sink_tokens() {
+        let toml = "[inference]\nsink_tokens = 8";
+        let config = Config::parse_toml(toml).unwrap();
+        assert_eq!(config.inference.sink_tokens, 8);
+    }
+
+    #[test]
+    fn test_parse_toml_grammar() {
+        let toml = "[inference]\ngrammar = \"root ::= [a-z]+\"";
+        let config = Config::parse_toml(toml).unwrap();
+        assert_eq!(config.inference.grammar, "root ::= [a-z]+");
+    }
+
+    #[test]
+    fn test_parse_toml_all_inference_fields() {
+        let toml = "[inference]\ntemperature = 0.5\ntop_k = 50\ntop_p = 0.95\nmax_tokens = 256\ndraft_ahead = 10\nadaptive_draft = true\ntensor_parallel = 4\nsink_tokens = 8\ngrammar = \"root ::= [0-9]+\"\nflash_attention = true\nsliding_window = 512\nmmap_kv = true\nprompt_cache = true\nkv_quantize = true\nswap_quantize = true\ntfs_z = 0.95\nmirostat = 2\nmirostat_tau = 3.0\nmirostat_eta = 0.2\nadaptive_memory = true\nadaptive_pin = 16";
+        let config = Config::parse_toml(toml).unwrap();
+        assert_eq!(config.inference.draft_ahead, 10);
+        assert!(config.inference.adaptive_draft);
+        assert_eq!(config.inference.tensor_parallel, 4);
+        assert_eq!(config.inference.sink_tokens, 8);
+        assert_eq!(config.inference.grammar, "root ::= [0-9]+");
+        assert!(config.inference.flash_attention);
+        assert_eq!(config.inference.sliding_window, 512);
+        assert!(config.inference.adaptive_memory);
+        assert_eq!(config.inference.adaptive_pin, 16);
     }
 }
 
