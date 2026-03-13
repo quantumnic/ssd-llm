@@ -262,7 +262,7 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("GET", "/") => send_json_response(
             &mut stream,
             200,
-            r#"{"status":"ssd-llm is running","version":"1.14.0"}"#,
+            &format!(r#"{{"status":"ssd-llm is running","version":"{}"}}"#, env!("CARGO_PKG_VERSION")),
         ),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
@@ -397,7 +397,7 @@ fn handle_cors_preflight(stream: &mut TcpStream) -> Result<()> {
 }
 
 fn handle_version(stream: &mut TcpStream) -> Result<()> {
-    send_json_response(stream, 200, r#"{"version":"1.13.0-ssd-llm"}"#)
+    send_json_response(stream, 200, &format!(r#"{{"version":"{}-ssd-llm"}}"#, env!("CARGO_PKG_VERSION")))
 }
 
 fn handle_health(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {

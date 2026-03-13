@@ -249,16 +249,23 @@ temperature = 0.7
 top_k = 40
 top_p = 0.9
 max_tokens = 128
-flash_attention = false
-sliding_window = 0
-mmap_kv = false
+draft_ahead = 5
+adaptive_draft = false
 prompt_cache = false
+tensor_parallel = 0
+sliding_window = 0
+sink_tokens = 4
+flash_attention = false
+mmap_kv = false
 kv_quantize = false
 swap_quantize = false
 tfs_z = 0.0
 mirostat = 0
 mirostat_tau = 5.0
 mirostat_eta = 0.1
+# grammar = "root ::= [a-z]+"
+adaptive_memory = false
+adaptive_pin = 0
 
 [paths]
 model_dir = "models"
@@ -378,6 +385,34 @@ port = 8080
         let toml = Config::default_toml();
         let config = Config::parse_toml(&toml).unwrap();
         assert_eq!(config.server.port, 11434);
+    }
+
+    #[test]
+    fn test_default_toml_contains_all_inference_fields() {
+        let toml = Config::default_toml();
+        let config = Config::parse_toml(&toml).unwrap();
+        let defaults = Config::default();
+        // Every inference field in default_toml should match the Default impl
+        assert_eq!(config.inference.temperature, defaults.inference.temperature);
+        assert_eq!(config.inference.top_k, defaults.inference.top_k);
+        assert_eq!(config.inference.top_p, defaults.inference.top_p);
+        assert_eq!(config.inference.max_tokens, defaults.inference.max_tokens);
+        assert_eq!(config.inference.draft_ahead, defaults.inference.draft_ahead);
+        assert_eq!(config.inference.adaptive_draft, defaults.inference.adaptive_draft);
+        assert_eq!(config.inference.tensor_parallel, defaults.inference.tensor_parallel);
+        assert_eq!(config.inference.sink_tokens, defaults.inference.sink_tokens);
+        assert_eq!(config.inference.sliding_window, defaults.inference.sliding_window);
+        assert_eq!(config.inference.flash_attention, defaults.inference.flash_attention);
+        assert_eq!(config.inference.mmap_kv, defaults.inference.mmap_kv);
+        assert_eq!(config.inference.prompt_cache, defaults.inference.prompt_cache);
+        assert_eq!(config.inference.kv_quantize, defaults.inference.kv_quantize);
+        assert_eq!(config.inference.swap_quantize, defaults.inference.swap_quantize);
+        assert_eq!(config.inference.tfs_z, defaults.inference.tfs_z);
+        assert_eq!(config.inference.mirostat, defaults.inference.mirostat);
+        assert_eq!(config.inference.mirostat_tau, defaults.inference.mirostat_tau);
+        assert_eq!(config.inference.mirostat_eta, defaults.inference.mirostat_eta);
+        assert_eq!(config.inference.adaptive_memory, defaults.inference.adaptive_memory);
+        assert_eq!(config.inference.adaptive_pin, defaults.inference.adaptive_pin);
     }
 
     #[test]
