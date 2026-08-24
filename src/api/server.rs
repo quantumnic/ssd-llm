@@ -262,7 +262,10 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> R
         ("GET", "/") => send_json_response(
             &mut stream,
             200,
-            &format!(r#"{{"status":"ssd-llm is running","version":"{}"}}"#, env!("CARGO_PKG_VERSION")),
+            &format!(
+                r#"{{"status":"ssd-llm is running","version":"{}"}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
         ),
         _ => send_response(&mut stream, 404, "Not Found"),
     }
@@ -397,7 +400,11 @@ fn handle_cors_preflight(stream: &mut TcpStream) -> Result<()> {
 }
 
 fn handle_version(stream: &mut TcpStream) -> Result<()> {
-    send_json_response(stream, 200, &format!(r#"{{"version":"{}-ssd-llm"}}"#, env!("CARGO_PKG_VERSION")))
+    send_json_response(
+        stream,
+        200,
+        &format!(r#"{{"version":"{}-ssd-llm"}}"#, env!("CARGO_PKG_VERSION")),
+    )
 }
 
 fn handle_health(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>) -> Result<()> {
@@ -568,8 +575,8 @@ fn handle_chat(stream: &mut TcpStream, ctx: &Arc<Mutex<ModelContext>>, body: &st
         mirostat_tau: extract_json_float(body, "mirostat_tau").unwrap_or(5.0),
         mirostat_eta: extract_json_float(body, "mirostat_eta").unwrap_or(0.1),
         grammar: extract_json_string(body, "grammar").unwrap_or_default(),
-                    min_p: 0.0,
-                    seed: None,
+        min_p: 0.0,
+        seed: None,
     };
 
     if streaming {
@@ -750,8 +757,8 @@ fn handle_openai_chat(
         mirostat_tau: 5.0,
         mirostat_eta: 0.1,
         grammar: extract_json_string(body, "grammar").unwrap_or_default(),
-                    min_p: 0.0,
-                    seed: None,
+        min_p: 0.0,
+        seed: None,
     };
 
     if streaming {
@@ -993,57 +1000,6 @@ fn extract_embedding_inputs(json: &str) -> Vec<String> {
         }
     }
     results
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_embedding_inputs_single_string() {
-        let json = r#"{"input": "hello world", "model": "test"}"#;
-        let inputs = extract_embedding_inputs(json);
-        assert_eq!(inputs, vec!["hello world"]);
-    }
-
-    #[test]
-    fn test_extract_embedding_inputs_array() {
-        let json = r#"{"input": ["hello", "world"], "model": "test"}"#;
-        let inputs = extract_embedding_inputs(json);
-        assert_eq!(inputs, vec!["hello", "world"]);
-    }
-
-    #[test]
-    fn test_extract_embedding_inputs_empty() {
-        let json = r#"{"model": "test"}"#;
-        let inputs = extract_embedding_inputs(json);
-        assert!(inputs.is_empty());
-    }
-
-    #[test]
-    fn test_extract_embedding_inputs_single_in_array() {
-        let json = r#"{"input": ["only one"]}"#;
-        let inputs = extract_embedding_inputs(json);
-        assert_eq!(inputs, vec!["only one"]);
-    }
-
-    #[test]
-    fn test_extract_embedding_inputs_ollama_format() {
-        // Ollama /api/embed uses the same "input" field
-        let json = r#"{"model": "llama3", "input": "Why is the sky blue?"}"#;
-        let inputs = extract_embedding_inputs(json);
-        assert_eq!(inputs, vec!["Why is the sky blue?"]);
-    }
-
-    #[test]
-    fn test_extract_embedding_inputs_ollama_batch() {
-        let json =
-            r#"{"model": "llama3", "input": ["Why is the sky blue?", "Why is the grass green?"]}"#;
-        let inputs = extract_embedding_inputs(json);
-        assert_eq!(inputs.len(), 2);
-        assert_eq!(inputs[0], "Why is the sky blue?");
-        assert_eq!(inputs[1], "Why is the grass green?");
-    }
 }
 
 // --- Helpers ---
@@ -1337,4 +1293,55 @@ fn extract_chat_messages(json: &str) -> Vec<crate::api::openai::ChatMessage> {
     }
 
     messages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_embedding_inputs_single_string() {
+        let json = r#"{"input": "hello world", "model": "test"}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_array() {
+        let json = r#"{"input": ["hello", "world"], "model": "test"}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_empty() {
+        let json = r#"{"model": "test"}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert!(inputs.is_empty());
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_single_in_array() {
+        let json = r#"{"input": ["only one"]}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs, vec!["only one"]);
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_ollama_format() {
+        // Ollama /api/embed uses the same "input" field
+        let json = r#"{"model": "llama3", "input": "Why is the sky blue?"}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs, vec!["Why is the sky blue?"]);
+    }
+
+    #[test]
+    fn test_extract_embedding_inputs_ollama_batch() {
+        let json =
+            r#"{"model": "llama3", "input": ["Why is the sky blue?", "Why is the grass green?"]}"#;
+        let inputs = extract_embedding_inputs(json);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0], "Why is the sky blue?");
+        assert_eq!(inputs[1], "Why is the grass green?");
+    }
 }

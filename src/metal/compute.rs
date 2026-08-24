@@ -2269,7 +2269,7 @@ fn matvec_bf16_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f3
 }
 
 /// CPU F16 matvec: each weight is 2 bytes (IEEE 754 half), dequantize on the fly
-fn matvec_f16_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+pub(crate) fn matvec_f16_cpu(w: &[u8], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; out_dim];
     for (row, y_val) in y.iter_mut().enumerate() {
         let row_off = row * in_dim * 2;
@@ -2353,9 +2353,7 @@ mod tests {
         // Simpler: all zero nibbles => val = 0-8 = -8 each
         // With x = [1.0; 32], sum = scale * sum_of_dequantized * x
         // Let's use all 0x88 nibbles: lo = 8, hi = 8, dequant = 0
-        for _ in 0..16 {
-            block.push(0x88);
-        }
+        block.extend_from_slice(&[0x88; 16]);
         let x = vec![1.0f32; 32];
         let y = matvec_q4_0_cpu(&block, &x, 1, 32);
         assert!(
@@ -2371,9 +2369,7 @@ mod tests {
         let scale_bits = half::f16::from_f32(1.0).to_bits();
         let mut block = vec![scale_bits as u8, (scale_bits >> 8) as u8];
         // 32 int8 values, all = 1
-        for _ in 0..32 {
-            block.push(1u8);
-        }
+        block.extend_from_slice(&[1u8; 32]);
         let x = vec![1.0f32; 32];
         let y = matvec_q8_0_cpu(&block, &x, 1, 32);
         // Each val = 1.0 * 1 = 1.0, dot with x[j]=1.0 => sum = 32.0
@@ -2556,9 +2552,9 @@ mod tests {
 
     #[test]
     fn test_f16_to_f32_roundtrip() {
-        let bits = half::f16::from_f32(3.14).to_bits();
+        let bits = half::f16::from_f32(1.25).to_bits();
         let result = f16_to_f32(bits as u8, (bits >> 8) as u8);
-        assert!((result - 3.14).abs() < 0.01);
+        assert!((result - 1.25).abs() < 0.01);
     }
 
     #[test]
@@ -3161,6 +3157,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_fused_qkv_gpu_matches_cpu() {
         let gpu = MetalGpu::new();
@@ -3234,6 +3231,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_fused_residual_rmsnorm_gpu_matches_cpu() {
         // If Metal GPU is available, verify GPU path matches CPU
@@ -3334,6 +3332,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_fused_qkv_rope_gpu_matches_cpu() {
         let gpu = MetalGpu::new();
@@ -3464,12 +3463,12 @@ mod tests {
         let ffn_input = fused_post_attn_norm_f32_cpu(&mut hidden, &attn, &weight, 1e-5);
 
         // Verify residual was applied
-        for i in 0..n {
+        for (i, &h) in hidden.iter().enumerate() {
             let expected = i as f32 * 0.1 + (n - i) as f32 * 0.05;
             assert!(
-                (hidden[i] - expected).abs() < 1e-6,
+                (h - expected).abs() < 1e-6,
                 "hidden[{i}]: got={} expected={}",
-                hidden[i],
+                h,
                 expected
             );
         }
@@ -3528,6 +3527,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_fused_post_attn_norm_gpu_matches_cpu() {
         let gpu = match crate::metal::gpu::MetalGpu::new() {
@@ -3607,6 +3607,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_fused_rmsnorm_linear_gpu_matches_cpu() {
         let gpu = match crate::metal::gpu::MetalGpu::new() {

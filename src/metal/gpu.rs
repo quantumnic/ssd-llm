@@ -9,7 +9,9 @@ use metal::{
     Buffer, CommandQueue, ComputePipelineState, Device, Library, MTLResourceOptions, MTLSize,
 };
 
-use tracing::{info, warn};
+#[cfg(target_os = "macos")]
+use tracing::info;
+use tracing::warn;
 
 /// Minimum elements to justify GPU dispatch overhead
 const MIN_GPU_ELEMENTS: usize = 4096;

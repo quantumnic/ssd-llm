@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` on both macOS and Linux runners.
+
+### Fixed
+
+- **Linux/non-macOS build**: the non-aarch64 fallback in `src/metal/neon.rs` called the private `matvec_f16_cpu`; visibility widened to `pub(crate)`. Non-macOS compilation of the binary now succeeds.
+- **Non-macOS test compilation**: five GPU-vs-CPU test functions that call macOS-only `MetalGpu::fused_*` methods are now gated behind `#[cfg(target_os = "macos")]`.
+- Warning-free under `cargo clippy --all-targets -- -D warnings` on both platforms (fixed `approx_constant` fixtures, loop-index patterns, `same_item_push`, unused mut/import/variable) and normalized formatting via `cargo fmt`.
+
 ## v1.37.0 — Fused Post-Attention Residual + FFN RMSNorm Metal Kernel (2026-02-28)
 
 ### Added

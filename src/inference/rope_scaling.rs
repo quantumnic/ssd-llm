@@ -222,13 +222,13 @@ mod tests {
         let freqs = config.precompute_frequencies();
 
         // Compare with original formula
-        for i in 0..64 {
+        for (i, &freq) in freqs.iter().enumerate().take(64) {
             let expected = 1.0 / 10000.0f32.powf((i * 2) as f32 / 128.0);
             assert!(
-                (freqs[i] - expected).abs() < 1e-6,
+                (freq - expected).abs() < 1e-6,
                 "pair {}: got {} expected {}",
                 i,
-                freqs[i],
+                freq,
                 expected
             );
         }

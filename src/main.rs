@@ -500,8 +500,8 @@ fn main() -> Result<()> {
                 mirostat_tau: 5.0,
                 mirostat_eta: 0.1,
                 grammar: grammar_str,
-                    min_p: 0.0,
-                    seed: None,
+                min_p: 0.0,
+                seed: None,
             };
 
             // Tensor parallelism

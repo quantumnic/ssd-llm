@@ -37,7 +37,6 @@ pub struct MetricsCollector {
     latencies_ms: Mutex<Vec<f64>>,
 }
 
-
 impl Default for MetricsCollector {
     fn default() -> Self {
         Self::new()
@@ -334,7 +333,7 @@ mod tests {
         let json = m.health_json("test-model", true);
         assert!(json.contains("\"status\":\"healthy\""));
         assert!(json.contains("\"model\":\"test-model\""));
-        assert!(json.contains(&format!("\"version\":\"{}\""  , env!("CARGO_PKG_VERSION"))));
+        assert!(json.contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))));
     }
 
     #[test]
