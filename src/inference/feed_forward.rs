@@ -66,6 +66,8 @@ pub fn feed_forward_gpu(
     // Suppress unused variable warning on non-macOS
     #[cfg(not(target_os = "macos"))]
     let _ = gpu;
+    #[cfg(not(target_os = "macos"))]
+    let _ = n_ff;
 
     feed_forward(x, w_gate, w_up, w_down, n_embd)
 }

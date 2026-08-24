@@ -70,13 +70,13 @@ fn bench_matvec(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let mut output = vec![0.0f32; rows];
-                    for r in 0..rows {
+                    for (r, out) in output.iter_mut().enumerate() {
                         let mut sum = 0.0f32;
                         let row_start = r * cols;
                         for c in 0..cols {
                             sum += matrix[row_start + c] * vector[c];
                         }
-                        output[r] = sum;
+                        *out = sum;
                     }
                     black_box(&output);
                 });
@@ -92,7 +92,7 @@ fn bench_rope(c: &mut Criterion) {
     let mut group = c.benchmark_group("rope");
 
     for head_dim in [64, 128] {
-        let mut q: Vec<f32> = (0..head_dim).map(|i| (i as f32) * 0.1).collect();
+        let q: Vec<f32> = (0..head_dim).map(|i| (i as f32) * 0.1).collect();
         let position = 42usize;
         let base = 10000.0f32;
 

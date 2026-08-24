@@ -883,7 +883,7 @@ mod tests {
             block_id: 7,
         };
         let data = BlockData {
-            keys: vec![3.14; 32],
+            keys: vec![1.25; 32],
             values: vec![2.71; 32],
             num_filled: 4,
         };
@@ -895,7 +895,7 @@ mod tests {
         let recovered = swapper.swap_in(id).unwrap();
         assert!(!swapper.is_swapped(&id));
         assert_eq!(recovered.num_filled, 4);
-        assert!((recovered.keys[0] - 3.14).abs() < 1e-6);
+        assert!((recovered.keys[0] - 1.25).abs() < 1e-6);
         assert!((recovered.values[0] - 2.71).abs() < 1e-6);
 
         let stats = swapper.stats();

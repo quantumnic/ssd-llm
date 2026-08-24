@@ -182,7 +182,7 @@ impl Sampler {
         }
     }
 
-        /// Set a deterministic seed for reproducible sampling
+    /// Set a deterministic seed for reproducible sampling
     pub fn with_seed(self, seed: u64) -> Self {
         self.rng_state.set(seed ^ 0x517cc1b727220a95);
         self
@@ -783,7 +783,10 @@ mod seed_tests {
 
         let tokens1: Vec<u32> = (0..20).map(|_| s1.sample(&logits)).collect();
         let tokens2: Vec<u32> = (0..20).map(|_| s2.sample(&logits)).collect();
-        assert_eq!(tokens1, tokens2, "Same seed should produce identical sequences");
+        assert_eq!(
+            tokens1, tokens2,
+            "Same seed should produce identical sequences"
+        );
     }
 
     #[test]
@@ -795,7 +798,10 @@ mod seed_tests {
 
         let tokens1: Vec<u32> = (0..20).map(|_| s1.sample(&logits)).collect();
         let tokens2: Vec<u32> = (0..20).map(|_| s2.sample(&logits)).collect();
-        assert_ne!(tokens1, tokens2, "Different seeds should produce different sequences");
+        assert_ne!(
+            tokens1, tokens2,
+            "Different seeds should produce different sequences"
+        );
     }
 
     #[test]
@@ -819,6 +825,9 @@ mod seed_tests {
 
         let tokens1: Vec<u32> = (0..10).map(|_| s1.sample(&logits)).collect();
         let tokens2: Vec<u32> = (0..10).map(|_| s2.sample(&logits)).collect();
-        assert_eq!(tokens1, tokens2, "Seeded Min-P sampling should be deterministic");
+        assert_eq!(
+            tokens1, tokens2,
+            "Seeded Min-P sampling should be deterministic"
+        );
     }
 }

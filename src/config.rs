@@ -398,21 +398,51 @@ port = 8080
         assert_eq!(config.inference.top_p, defaults.inference.top_p);
         assert_eq!(config.inference.max_tokens, defaults.inference.max_tokens);
         assert_eq!(config.inference.draft_ahead, defaults.inference.draft_ahead);
-        assert_eq!(config.inference.adaptive_draft, defaults.inference.adaptive_draft);
-        assert_eq!(config.inference.tensor_parallel, defaults.inference.tensor_parallel);
+        assert_eq!(
+            config.inference.adaptive_draft,
+            defaults.inference.adaptive_draft
+        );
+        assert_eq!(
+            config.inference.tensor_parallel,
+            defaults.inference.tensor_parallel
+        );
         assert_eq!(config.inference.sink_tokens, defaults.inference.sink_tokens);
-        assert_eq!(config.inference.sliding_window, defaults.inference.sliding_window);
-        assert_eq!(config.inference.flash_attention, defaults.inference.flash_attention);
+        assert_eq!(
+            config.inference.sliding_window,
+            defaults.inference.sliding_window
+        );
+        assert_eq!(
+            config.inference.flash_attention,
+            defaults.inference.flash_attention
+        );
         assert_eq!(config.inference.mmap_kv, defaults.inference.mmap_kv);
-        assert_eq!(config.inference.prompt_cache, defaults.inference.prompt_cache);
+        assert_eq!(
+            config.inference.prompt_cache,
+            defaults.inference.prompt_cache
+        );
         assert_eq!(config.inference.kv_quantize, defaults.inference.kv_quantize);
-        assert_eq!(config.inference.swap_quantize, defaults.inference.swap_quantize);
+        assert_eq!(
+            config.inference.swap_quantize,
+            defaults.inference.swap_quantize
+        );
         assert_eq!(config.inference.tfs_z, defaults.inference.tfs_z);
         assert_eq!(config.inference.mirostat, defaults.inference.mirostat);
-        assert_eq!(config.inference.mirostat_tau, defaults.inference.mirostat_tau);
-        assert_eq!(config.inference.mirostat_eta, defaults.inference.mirostat_eta);
-        assert_eq!(config.inference.adaptive_memory, defaults.inference.adaptive_memory);
-        assert_eq!(config.inference.adaptive_pin, defaults.inference.adaptive_pin);
+        assert_eq!(
+            config.inference.mirostat_tau,
+            defaults.inference.mirostat_tau
+        );
+        assert_eq!(
+            config.inference.mirostat_eta,
+            defaults.inference.mirostat_eta
+        );
+        assert_eq!(
+            config.inference.adaptive_memory,
+            defaults.inference.adaptive_memory
+        );
+        assert_eq!(
+            config.inference.adaptive_pin,
+            defaults.inference.adaptive_pin
+        );
     }
 
     #[test]

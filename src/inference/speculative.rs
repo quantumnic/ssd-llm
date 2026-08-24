@@ -1070,7 +1070,7 @@ mod tests {
         let mut rng = XorShift64::new();
         for _ in 0..1000 {
             let v = rng.next_f32();
-            assert!(v >= 0.0 && v < 1.0, "RNG value {} out of range", v);
+            assert!((0.0..1.0).contains(&v), "RNG value {} out of range", v);
         }
     }
 

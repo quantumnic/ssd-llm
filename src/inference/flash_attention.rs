@@ -477,13 +477,8 @@ mod tests {
         );
 
         // Output should be finite (no NaN/Inf from overflow)
-        for i in 0..n_embd {
-            assert!(
-                output[i].is_finite(),
-                "output[{}] = {} is not finite",
-                i,
-                output[i]
-            );
+        for (i, &v) in output.iter().enumerate() {
+            assert!(v.is_finite(), "output[{}] = {} is not finite", i, v);
         }
     }
 
@@ -513,9 +508,7 @@ mod tests {
         );
 
         assert_eq!(output.len(), n_embd);
-        for i in 0..n_embd {
-            assert!(output[i].is_finite());
-        }
+        assert!(output.iter().all(|&v| v.is_finite()));
     }
 
     #[test]
